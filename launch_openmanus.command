@@ -76,7 +76,7 @@ python -m pip install playwright
 if [ $? -eq 0 ]; then
     echo -e "${YELLOW}Installing Playwright browsers...${NC}"
     python -m playwright install
-    
+
     if [ $? -ne 0 ]; then
         echo -e "${RED}Warning: Failed to install Playwright browsers. Browser features may not work.${NC}"
     fi
