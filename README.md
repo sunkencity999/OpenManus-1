@@ -11,13 +11,23 @@ English | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](READM
 [![Demo](https://img.shields.io/badge/Demo-Hugging%20Face-yellow)](https://huggingface.co/spaces/lyh-917/OpenManusDemo)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15186407.svg)](https://doi.org/10.5281/zenodo.15186407)
 
-# 👋 OpenManus
+# 👋 LocalManus
 
-Manus is incredible, but OpenManus can achieve any idea without an *Invite Code* 🛫!
+*A fork of OpenManus with enhanced reasoning capabilities and task completion*
 
-Our team members [@Xinbin Liang](https://github.com/mannaandpoem) and [@Jinyu Xiang](https://github.com/XiangJinyu) (core authors), along with [@Zhaoyang Yu](https://github.com/MoshiQAQ), [@Jiayi Zhang](https://github.com/didiforgithub), and [@Sirui Hong](https://github.com/stellaHSR), we are from [@MetaGPT](https://github.com/geekan/MetaGPT). The prototype is launched within 3 hours and we are keeping building!
+## Overview
 
-It's a simple implementation, so we welcome any suggestions, contributions, and feedback!
+LocalManus is a fork of the OpenManus project that enhances the reasoning capabilities, ensures task completion, and adds specialized content generation features. It's designed to provide a more reliable and effective agent experience with minimal redundant questioning.
+
+## Key Features
+
+- **Enhanced Task Completion**: Automatically completes tasks after a reasonable number of steps
+- **Improved Web Navigation**: Better URL detection and handling, including URL fragments
+- **Reduced Redundant Questioning**: Tracks previous questions to avoid repetition
+- **File Handling**: Automatically detects file paths and saves content to requested files
+- **Specialized Content Creation**: Support for marketing plans, poems, research reports, and more
+
+*Based on the original OpenManus project by [@Xinbin Liang](https://github.com/mannaandpoem), [@Jinyu Xiang](https://github.com/XiangJinyu), and team.*
 
 Enjoy your own agent with OpenManus!
 
