@@ -126,6 +126,51 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-..."  # Replace with your actual API key
 ```
 
+## LocalManus Installation
+
+LocalManus provides easy installation scripts for all major platforms that will set up the complete environment, including Ollama and the default model.
+
+### One-Click Installation
+
+#### macOS
+```bash
+./install_macos.sh
+```
+
+#### Linux
+```bash
+./install_linux.sh
+```
+
+#### Windows
+```powershell
+# Run PowerShell as Administrator
+.\install_windows.ps1
+```
+
+The installation scripts will:
+- Check for and install Python 3.8+ if needed
+- Install Ollama if not already installed
+- Pull the default LLM model (llama3)
+- Set up a virtual environment
+- Install all required dependencies
+- Create a configuration file
+- Create a launch script
+
+### Running LocalManus
+
+After installation, you can run LocalManus using the provided launch script:
+
+#### macOS/Linux
+```bash
+./launch_localmanus.sh
+```
+
+#### Windows
+```bash
+launch_localmanus.bat
+```
+
 ## Quick Start
 
 One line for run OpenManus:
