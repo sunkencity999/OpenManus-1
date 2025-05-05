@@ -74,8 +74,8 @@ class ImprovedManus(ToolCallAgent):
     task_completer: TaskCompleter = None
     task_analyzer: Optional[TaskAnalyzer] = None
     
-    # Memory database path
-    memory_db_path: str = Field(default="./memory.db")
+    # Memory database path - if None, will use the default platform-specific path
+    memory_db_path: Optional[str] = Field(default=None)
     
     # Tracking attributes
     browser_used: bool = False
@@ -105,8 +105,13 @@ class ImprovedManus(ToolCallAgent):
         self.browser_context_helper = BrowserContextHelper(self)
         
         # Use PersistentMemory instead of ConversationMemory
-        memory_path = os.path.join(config.workspace_root, self.memory_db_path)
-        self.conversation_memory = PersistentMemory(db_path=memory_path)
+        if self.memory_db_path is not None:
+            # If a specific path is provided, use it
+            memory_path = os.path.join(config.workspace_root, self.memory_db_path)
+            self.conversation_memory = PersistentMemory(db_path=memory_path)
+        else:
+            # Otherwise use the default platform-specific path
+            self.conversation_memory = PersistentMemory()
         
         self.browser_navigator = BrowserNavigator()
         self.url_detector = URLDetector()

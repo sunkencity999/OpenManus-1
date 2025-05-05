@@ -75,9 +75,16 @@ class PersistentMemory(ConversationMemory):
     """
     
     # Database configuration
-    db_path: str = Field(default="./memory.db")
+    db_path: str = Field(default=None)
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536  # Dimension of OpenAI's text-embedding-3-small
+    
+    # Default memory directory paths by platform
+    _default_memory_dirs = {
+        "darwin": os.path.expanduser("~/.localmanus/memory"),  # macOS
+        "linux": os.path.expanduser("~/.localmanus/memory"),   # Linux
+        "win32": os.path.expanduser("~/.localmanus/memory")    # Windows
+    }
     
     # Memory management settings
     max_memories: int = 1000
@@ -93,6 +100,28 @@ class PersistentMemory(ConversationMemory):
     @model_validator(mode="after")
     def initialize_database(self) -> "PersistentMemory":
         """Initialize the database connection and tables."""
+        # Set default db_path if none is provided
+        if self.db_path is None:
+            import platform
+            system = platform.system().lower()
+            if system == "darwin":
+                platform_key = "darwin"  # macOS
+            elif system == "linux":
+                platform_key = "linux"   # Linux
+            elif system == "windows":
+                platform_key = "win32"   # Windows
+            else:
+                platform_key = "linux"   # Default to Linux for unknown systems
+                
+            # Use the default directory for the current platform
+            default_dir = self._default_memory_dirs.get(platform_key, os.path.expanduser("~/.localmanus/memory"))
+            
+            # Create a unique database file name based on timestamp
+            import uuid
+            db_name = f"memory_{uuid.uuid4().hex[:8]}.db"
+            self.db_path = os.path.join(default_dir, db_name)
+            logger.info(f"Using default memory database path: {self.db_path}")
+            
         self._ensure_db_directory()
         self._connect_db()
         self._create_tables()

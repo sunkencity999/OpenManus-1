@@ -272,6 +272,14 @@ if (-not (Test-Path "workspace")) {
 }
 Write-Success "Workspace directory created."
 
+# Create memory storage directory
+Write-Message "Setting up memory storage..." -Color Cyan
+$memoryDir = "$env:USERPROFILE\.localmanus\memory"
+if (-not (Test-Path $memoryDir)) {
+    New-Item -ItemType Directory -Path $memoryDir -Force | Out-Null
+}
+Write-Success "Memory storage directory created at $memoryDir"
+
 # Create launch script
 Write-Message "Creating launch script..." -Color Cyan
 @"

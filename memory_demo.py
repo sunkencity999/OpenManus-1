@@ -22,11 +22,10 @@ async def demo_memory_system():
     print("LocalManus Persistent Memory System Demo".center(80))
     print("="*80 + "\n")
     
-    # Initialize the memory system
-    memory_path = os.path.join(config.workspace_root, "demo_memory.db")
-    memory = PersistentMemory(db_path=memory_path)
+    # Initialize the memory system using the default path
+    memory = PersistentMemory()
     
-    print(f"Initialized persistent memory at: {memory_path}")
+    print(f"Initialized persistent memory at: {memory.db_path}")
     
     # Demo 1: Storing memories
     print("\n[DEMO 1] Storing different types of memories")

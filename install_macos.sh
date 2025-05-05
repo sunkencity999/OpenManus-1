@@ -145,6 +145,12 @@ print_message "Installing dependencies..."
 pip3 install -r requirements.txt
 print_success "Dependencies installed."
 
+# Create memory database directory
+print_message "Setting up memory storage..."
+mkdir -p "$HOME/.localmanus/memory"
+chmod 755 "$HOME/.localmanus/memory"
+print_success "Memory storage directory created at $HOME/.localmanus/memory"
+
 # Pull default model with Ollama
 if command_exists ollama; then
     print_message "Pulling default model with Ollama..."
