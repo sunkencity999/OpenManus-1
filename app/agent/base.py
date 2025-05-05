@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import asyncio
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -149,7 +150,11 @@ class BaseAgent(BaseModel, ABC):
                     logger.warning(f"Reached {self.current_step} steps. Checking if task completion is needed.")
                     if hasattr(self, 'task_completed') and not self.task_completed:
                         logger.warning("Task not completed yet. Forcing completion.")
-                        self._force_task_completion()
+                        # Check if _force_task_completion is async or not
+                        if asyncio.iscoroutinefunction(self._force_task_completion):
+                            await self._force_task_completion()
+                        else:
+                            self._force_task_completion()
                         self.state = AgentState.FINISHED
 
                 results.append(f"Step {self.current_step}: {step_result}")
@@ -159,7 +164,11 @@ class BaseAgent(BaseModel, ABC):
                 if hasattr(self, '_force_task_completion'):
                     logger.warning(f"Reached maximum steps ({self.max_steps}). Forcing task completion.")
                     if hasattr(self, 'task_completed') and not self.task_completed:
-                        self._force_task_completion()
+                        # Check if _force_task_completion is async or not
+                        if asyncio.iscoroutinefunction(self._force_task_completion):
+                            await self._force_task_completion()
+                        else:
+                            self._force_task_completion()
                 
                 self.current_step = 0
                 self.state = AgentState.IDLE

@@ -13,6 +13,7 @@ from app.agent.browser_navigator import BrowserNavigator
 from app.agent.url_detector import URLDetector
 from app.agent.task_completer import TaskCompleter
 from app.agent.memory_manager import ConversationMemory, ToolUsageTracker
+from app.agent.persistent_memory import PersistentMemory
 from app.agent.task_analyzer import TaskAnalyzer
 from app.agent.toolcall import ToolCallAgent
 from app.config import config
@@ -67,11 +68,14 @@ class ImprovedManus(ToolCallAgent):
     _initialized: bool = False
     
     # New components for improved reasoning
-    conversation_memory: ConversationMemory = None
+    conversation_memory: PersistentMemory = None
     browser_navigator: BrowserNavigator = None
     url_detector: URLDetector = None
     task_completer: TaskCompleter = None
     task_analyzer: Optional[TaskAnalyzer] = None
+    
+    # Memory database path
+    memory_db_path: str = Field(default="./memory.db")
     
     # Tracking attributes
     browser_used: bool = False
@@ -99,7 +103,11 @@ class ImprovedManus(ToolCallAgent):
     def initialize_helper(self) -> "ImprovedManus":
         """Initialize basic components synchronously."""
         self.browser_context_helper = BrowserContextHelper(self)
-        self.conversation_memory = ConversationMemory()
+        
+        # Use PersistentMemory instead of ConversationMemory
+        memory_path = os.path.join(config.workspace_root, self.memory_db_path)
+        self.conversation_memory = PersistentMemory(db_path=memory_path)
+        
         self.browser_navigator = BrowserNavigator()
         self.url_detector = URLDetector()
         self.task_completer = TaskCompleter()
@@ -396,8 +404,17 @@ class ImprovedManus(ToolCallAgent):
                 # Extract content from the page for context
                 content = await self.get_browser_content()
                 
-                # Add to context
-                self.add_to_context(f"I've visited {url} and found the following content:\n{content[:500]}...")
+                # Store in persistent memory with higher priority
+                self.conversation_memory.store_memory(
+                    text=f"Content from {url}:\n{content[:1000]}...",
+                    source="browser",
+                    priority="high",
+                    tags=["web_content", "visited_url"],
+                    metadata={"url": url, "timestamp": time.time()}
+                )
+                
+                # Add summary to context
+                self.add_to_context(f"I've visited {url} and found relevant content.")
                 
                 # Process content for task completion
                 self._process_content_for_task(url, content)
@@ -413,11 +430,28 @@ class ImprovedManus(ToolCallAgent):
             logger.error(error_msg)
             return error_msg
 
-    def add_to_context(self, text: str) -> None:
-        """Add text to the agent's context for better reasoning."""
+    def add_to_context(self, text: str, priority: str = "medium", source: str = "agent", 
+                      tags: List[str] = None) -> None:
+        """Add text to the agent's context for better reasoning and store in persistent memory."""
+        # Initialize context if it doesn't exist
         if not hasattr(self, 'context'):
             self.context = ""
+        
+        # Add to in-memory context
         self.context += f"\n{text}"
+        
+        # Store in persistent memory
+        if tags is None:
+            tags = ["context"]
+        
+        # Avoid storing very short or uninformative text
+        if len(text) > 10 and not text.isspace():
+            self.conversation_memory.store_memory(
+                text=text,
+                source=source,
+                priority=priority,
+                tags=tags
+            )
         
     @property
     def context_manager(self):
@@ -451,16 +485,51 @@ class ImprovedManus(ToolCallAgent):
             
         return f"No information about {section_name} found."
         
-    def _force_task_completion(self) -> None:
-        """Force the completion of the current task."""
+    async def _gather_relevant_memories(self) -> str:
+        """Gather relevant memories for the current task using semantic search."""
+        if not self.current_task:
+            return ""
+            
+        try:
+            # Use semantic search to find relevant memories
+            results = await self.conversation_memory.search_memories_semantic(self.current_task, limit=10)
+            
+            # Filter and format relevant memories
+            relevant_content = []
+            for memory, score in results:
+                if score > 0.7:  # Only include highly relevant memories
+                    relevant_content.append(f"- {memory.text} (relevance: {score:.2f})")
+            
+            if relevant_content:
+                return "\n\nRelevant information from memory:\n" + "\n".join(relevant_content)
+            return ""
+        except Exception as e:
+            logger.error(f"Error gathering memories: {str(e)}")
+            return ""
+    
+    async def _force_task_completion(self) -> None:
+        """Force the completion of the current task using persistent memory."""
         if not hasattr(self, 'task_completer') or self.task_completed:
             return
             
         # Add default information if we don't have enough
         self._add_default_information()
         
+        # Gather relevant memories for this task
+        relevant_memories = await self._gather_relevant_memories()
+        if relevant_memories:
+            self.add_to_context(relevant_memories, priority="high", tags=["task_completion", "memory_retrieval"])
+        
         # Create the deliverable
         deliverable = self.task_completer.create_deliverable()
+        
+        # Store the completed task in memory
+        self.conversation_memory.store_task(
+            task_description=self.current_task,
+            completed=True,
+            outcome="Task completed successfully",
+            metadata={"deliverable_length": len(deliverable)}
+        )
         
         # Check if the task involves saving to a file
         file_path = self._extract_file_path_from_task()
