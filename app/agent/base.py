@@ -143,13 +143,32 @@ class BaseAgent(BaseModel, ABC):
                 # Check for stuck state
                 if self.is_stuck():
                     self.handle_stuck_state()
+                    
+                # Force task completion if we've reached step 5 and the task isn't completed yet
+                if self.current_step >= 5 and hasattr(self, '_force_task_completion'):
+                    logger.warning(f"Reached {self.current_step} steps. Checking if task completion is needed.")
+                    if hasattr(self, 'task_completed') and not self.task_completed:
+                        logger.warning("Task not completed yet. Forcing completion.")
+                        self._force_task_completion()
+                        self.state = AgentState.FINISHED
 
                 results.append(f"Step {self.current_step}: {step_result}")
 
             if self.current_step >= self.max_steps:
+                # Force task completion if we've reached the maximum number of steps
+                if hasattr(self, '_force_task_completion'):
+                    logger.warning(f"Reached maximum steps ({self.max_steps}). Forcing task completion.")
+                    if hasattr(self, 'task_completed') and not self.task_completed:
+                        self._force_task_completion()
+                
                 self.current_step = 0
                 self.state = AgentState.IDLE
                 results.append(f"Terminated: Reached max steps ({self.max_steps})")
+                
+                # Add the final response if task was completed
+                if hasattr(self, 'task_completed') and self.task_completed and hasattr(self, 'task_completer'):
+                    results.append(f"Final deliverable:\n{self.task_completer.deliverable_content}")
+                    self.update_memory("assistant", self.task_completer.deliverable_content)
         await SANDBOX_CLIENT.cleanup()
         return "\n".join(results) if results else "No steps executed"
 

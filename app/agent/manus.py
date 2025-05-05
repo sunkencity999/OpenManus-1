@@ -1,12 +1,16 @@
 from typing import Dict, List, Optional
+import re
+import json
 
 from pydantic import Field, model_validator
 
 from app.agent.browser import BrowserContextHelper
 from app.agent.toolcall import ToolCallAgent
+from app.agent.url_detector import URLDetector
 from app.config import config
 from app.logger import logger
 from app.prompt.manus import NEXT_STEP_PROMPT, SYSTEM_PROMPT
+from app.schema import ToolCall
 from app.tool import Terminate, ToolCollection
 from app.tool.ask_human import AskHuman
 from app.tool.browser_use_tool import BrowserUseTool
@@ -49,11 +53,15 @@ class Manus(ToolCallAgent):
         default_factory=dict
     )  # server_id -> url/command
     _initialized: bool = False
+    
+    # URL detector for better handling of website requests
+    url_detector: URLDetector = Field(default_factory=URLDetector)
 
     @model_validator(mode="after")
     def initialize_helper(self) -> "Manus":
         """Initialize basic components synchronously."""
         self.browser_context_helper = BrowserContextHelper(self)
+        self.url_detector = URLDetector()
         return self
 
     @classmethod
@@ -136,12 +144,34 @@ class Manus(ToolCallAgent):
         if self._initialized:
             await self.disconnect_mcp_server()
             self._initialized = False
+            
+    async def execute_tool(self, command: ToolCall) -> str:
+        """Override execute_tool to intercept and modify tool calls when appropriate."""
+        # Check if this is a tool call that should be intercepted
+        intercepted_call = self.url_detector.intercept_tool_call(command)
+        if intercepted_call:
+            # Use the intercepted call instead
+            logger.info(f"🔄 Intercepted tool call: {command.function.name} -> {intercepted_call.function.name}")
+            return await super().execute_tool(intercepted_call)
+            
+        # Otherwise, proceed with the original call
+        return await super().execute_tool(command)
 
     async def think(self) -> bool:
         """Process current state and decide next actions with appropriate context."""
         if not self._initialized:
             await self.initialize_mcp_servers()
             self._initialized = True
+            
+        # Check if this is a new task with a URL or website mention
+        if self.memory.messages and len(self.memory.messages) <= 2:
+            user_message = next((msg for msg in self.memory.messages if msg.role == "user"), None)
+            if user_message and user_message.content:
+                # Check if the user message contains URLs or website mentions
+                if self.url_detector.should_use_browser(user_message.content):
+                    # Modify the prompt to encourage browser use
+                    browser_hint = "\n\nIMPORTANT: The user's request mentions a website or URL. Use the browser_use tool to visit the mentioned website before asking questions.\n"
+                    self.next_step_prompt += browser_hint
 
         original_prompt = self.next_step_prompt
         recent_messages = self.memory.messages[-3:] if self.memory.messages else []

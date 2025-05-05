@@ -28,20 +28,32 @@ if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$PYTHON_VERSION" | sort -V | head -n1
     exit 1
 fi
 
-# Remove existing virtual environment if it exists
-if [ -d ".venv" ]; then
-    echo -e "${YELLOW}Removing existing virtual environment...${NC}"
-    rm -rf .venv
+# Check if virtual environment exists
+if [ ! -d ".venv" ]; then
+    # Create virtual environment using built-in venv module
+    echo -e "${YELLOW}Creating virtual environment...${NC}"
+    python3 -m venv .venv
+
+    if [ $? -ne 0 ] || [ ! -d ".venv" ]; then
+        echo -e "${RED}Error: Failed to create virtual environment.${NC}"
+        read -p "Press Enter to exit..."
+        exit 1
+    fi
+else
+    echo -e "${GREEN}Using existing virtual environment...${NC}"
 fi
 
-# Create virtual environment using built-in venv module
-echo -e "${YELLOW}Creating virtual environment...${NC}"
-python3 -m venv .venv
-
-if [ $? -ne 0 ] || [ ! -d ".venv" ]; then
-    echo -e "${RED}Error: Failed to create virtual environment.${NC}"
-    read -p "Press Enter to exit..."
-    exit 1
+# Check if .venv_problem file exists (indicates previous issues with the venv)
+if [ -f ".venv_problem" ]; then
+    echo -e "${YELLOW}Previous issues with virtual environment detected. Recreating...${NC}"
+    rm -rf .venv
+    python3 -m venv .venv
+    if [ $? -ne 0 ] || [ ! -d ".venv" ]; then
+        echo -e "${RED}Error: Failed to recreate virtual environment.${NC}"
+        read -p "Press Enter to exit..."
+        exit 1
+    fi
+    rm -f .venv_problem
 fi
 
 # Activate virtual environment
