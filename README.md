@@ -161,7 +161,14 @@ The installation scripts will:
 
 After installation, you can run LocalManus using the provided launch script:
 
-#### macOS/Linux
+#### macOS
+```bash
+# Option 1: Double-click launch_localmanus.command in Finder
+# Option 2: Run from terminal
+./launch_localmanus.sh
+```
+
+#### Linux
 ```bash
 ./launch_localmanus.sh
 ```
