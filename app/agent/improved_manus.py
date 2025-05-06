@@ -94,6 +94,7 @@ class ImprovedManus(ToolCallAgent):
     visited_urls: Set[str] = Field(default_factory=set)
     current_task: str = ""
     task_completed: bool = False
+    step_count: int = 0  # Initialize step counter
 
     # Memory management components
     tool_tracker: ToolUsageTracker = Field(default_factory=ToolUsageTracker)
@@ -315,8 +316,15 @@ class ImprovedManus(ToolCallAgent):
         # Close persistent memory connection
         if self.conversation_memory:
             try:
-                await self.conversation_memory.close()
-                logger.info("Persistent memory connection closed.")
+                # Check if close method exists and is awaitable
+                if hasattr(self.conversation_memory, 'close'):
+                    close_method = getattr(self.conversation_memory, 'close')
+                    if asyncio.iscoroutinefunction(close_method):
+                        await close_method()
+                    else:
+                        # Call non-async close method
+                        close_method()
+                    logger.info("Persistent memory connection closed.")
             except Exception as e:
                 logger.error(f"Error closing persistent memory: {e}")
 
@@ -420,15 +428,18 @@ class ImprovedManus(ToolCallAgent):
         except json.JSONDecodeError:
             error_msg = f"Invalid JSON arguments for tool {name}: {args_str}"
             logger.error(error_msg)
+            args_with_message = {"arguments": args_str, "message": "Invalid JSON arguments"}
             self.tool_tracker.record_tool_usage(
-                name, {"arguments": args_str}, "failure", "Invalid JSON arguments"
+                name, args_with_message, "failure"
             )
             return f"Error: {error_msg}"
 
         if name not in self.available_tools.tool_map:
             error_msg = f"Unknown tool '{name}' called."
             logger.error(error_msg)
-            self.tool_tracker.record_tool_usage(name, args, "failure", "Unknown tool")
+            args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
+            args_with_message["message"] = "Unknown tool"
+            self.tool_tracker.record_tool_usage(name, args_with_message, "failure")
             return f"Error: {error_msg}"
 
         logger.info(f"Executing Tool: {name} with args: {args}")
@@ -455,6 +466,9 @@ class ImprovedManus(ToolCallAgent):
         if name == "ask_human":
             question = args.get("inquire")
             if question:
+                # Record the question in the tool tracker
+                self.tool_tracker.record_question(question)
+                
                 if self._is_redundant_question(question):
                     observation = (
                         f"Observation: Question '{question}' seems redundant. Skipping."
@@ -496,7 +510,9 @@ class ImprovedManus(ToolCallAgent):
         except Exception as e:
             error_msg = f"Error executing tool '{name}' with args {args_str}: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            self.tool_tracker.record_tool_usage(name, args, "failure", str(e))
+            args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
+            args_with_message["message"] = str(e)
+            self.tool_tracker.record_tool_usage(name, args_with_message, "failure")
             # Return a formatted error observation for the LLM
             observation = f"Error: Tool `{name}` failed with error: {str(e)}"
 
@@ -991,41 +1007,104 @@ class ImprovedManus(ToolCallAgent):
             if visited_count >= max_sites:
                 break
             logger.info(f"Visiting URL {i+1}/{len(urls_to_visit)}: {url}")
-            try:
-                # execute_browser_use handles navigation, overlays, extraction
-                # It returns the observation string which includes the content or error
-                observation = await self.execute_browser_use("go_to_url", url=url)
-
-                # Extract content from the observation string if successful
-                if observation.startswith(
-                    "Observed output"
-                ) and not observation.startswith("Error:"):
-                    # Extract content after the preamble
-                    content_part = observation.split("executed:\n", 1)[-1]
-                    if (
-                        content_part
-                        and not content_part.startswith("Visited")
-                        or "extract significant content" not in content_part
-                    ):
-                        logger.info(
-                            f"Successfully retrieved content for {url}, length: {len(content_part)}"
-                        )
-                        processed_content.append({"url": url, "content": content_part})
-                        visited_count += 1
+            max_retries = 2  # Number of retries for each URL
+            retry_count = 0
+            success = False
+            
+            while retry_count <= max_retries and not success:
+                try:
+                    if retry_count > 0:
+                        logger.info(f"Retry attempt {retry_count} for URL: {url}")
+                        
+                    # execute_browser_use handles navigation, overlays, extraction
+                    # It returns the observation string which includes the content or error
+                    observation = await self.execute_browser_use("go_to_url", url=url)
+                    
+                    # Check if we got a timeout or connection error that might benefit from a retry
+                    if "timeout" in observation.lower() or "connection" in observation.lower() or "failed to load" in observation.lower():
+                        if retry_count < max_retries:
+                            logger.warning(f"Timeout or connection issue for {url}, will retry. Error: {observation[:100]}...")
+                            retry_count += 1
+                            time.sleep(2)  # Wait before retry
+                            continue
+                    
+                    # Extract content from the observation string if successful
+                    if observation.startswith("Observed output") and not observation.startswith("Error:"):
+                        # Extract content after the preamble
+                        content_part = observation.split("executed:\n", 1)[-1]
+                        
+                        # Check if we got meaningful content
+                        if content_part and len(content_part.strip()) > 100:
+                            if not content_part.startswith("Visited") and "extract significant content" not in content_part:
+                                logger.info(f"Successfully retrieved content for {url}, length: {len(content_part)}")
+                                
+                                # Store the content with the URL
+                                processed_content.append({"url": url, "content": content_part})
+                                visited_count += 1
+                                success = True
+                            else:
+                                # Content extraction issue, might benefit from a retry with a different approach
+                                if retry_count < max_retries:
+                                    logger.warning(f"Content extraction failed for {url}, will retry with different approach")
+                                    # Try to extract content directly using a more aggressive approach
+                                    try:
+                                        # Get the current page state which should include the HTML
+                                        browser_tool = self.available_tools.get_tool("browser_use")
+                                        state_result = await browser_tool.get_current_state()
+                                        
+                                        if state_result and not state_result.error:
+                                            # Extract the HTML and process it directly
+                                            html_content = str(state_result.output)
+                                            extracted_content = self._extract_main_content(html_content)
+                                            
+                                            if extracted_content and len(extracted_content) > 200:
+                                                logger.info(f"Successfully extracted content directly from HTML for {url}")
+                                                processed_content.append({"url": url, "content": extracted_content})
+                                                visited_count += 1
+                                                success = True
+                                            else:
+                                                logger.warning(f"Direct HTML extraction failed for {url}")
+                                                retry_count += 1
+                                        else:
+                                            logger.warning(f"Failed to get page state for {url}")
+                                            retry_count += 1
+                                    except Exception as e:
+                                        logger.error(f"Error during direct HTML extraction for {url}: {e}")
+                                        retry_count += 1
+                                else:
+                                    logger.warning(f"Skipping URL {url} after {max_retries} failed extraction attempts")
+                                    success = True  # Mark as done to move on
+                        else:
+                            # Empty or very short content, might be a loading issue
+                            if retry_count < max_retries:
+                                logger.warning(f"Empty or very short content for {url}, will retry")
+                                retry_count += 1
+                                time.sleep(2)  # Wait before retry
+                            else:
+                                logger.warning(f"Skipping URL {url} due to persistent empty content issue")
+                                success = True  # Mark as done to move on
                     else:
-                        logger.warning(
-                            f"Skipping URL {url} due to extraction failure indicated in observation: {content_part[:100]}..."
-                        )
-                else:
-                    logger.warning(
-                        f"Skipping URL {url} due to error in observation: {observation[:200]}"
-                    )
-
-                if i < len(urls_to_visit) - 1:
-                    time.sleep(1.5)  # Delay
-
-            except Exception as e:
-                logger.error(f"Critical error processing URL {url}: {e}", exc_info=True)
+                        # Error in observation
+                        if retry_count < max_retries:
+                            logger.warning(f"Error for {url}, will retry. Error: {observation[:100]}...")
+                            retry_count += 1
+                            time.sleep(2)  # Wait before retry
+                        else:
+                            logger.warning(f"Skipping URL {url} after {max_retries} failed attempts. Last error: {observation[:200]}")
+                            success = True  # Mark as done to move on
+                
+                except Exception as e:
+                    if retry_count < max_retries:
+                        logger.error(f"Exception processing URL {url}: {e}, will retry")
+                        retry_count += 1
+                        time.sleep(2)  # Wait before retry
+                    else:
+                        logger.error(f"Critical error processing URL {url} after {max_retries} retries: {e}")
+                        success = True  # Mark as done to move on
+            
+            # Add a delay between URLs to avoid rate limiting
+            if i < len(urls_to_visit) - 1:
+                time.sleep(2)  # Slightly longer delay between URLs
 
         # --- Step 3: Analyze Collected Content ---
         logger.info(
@@ -1218,96 +1297,108 @@ class ImprovedManus(ToolCallAgent):
         if not html:
             return ""
         try:
+            # Try to parse the HTML with the best available parser
             try:
                 soup = BeautifulSoup(html, "lxml")  # Prefer lxml for speed/robustness
             except ImportError:
                 try:
                     soup = BeautifulSoup(html, "html.parser")
                 except Exception as parse_err:
-                    logger.error(
-                        f"HTML parsing failed: {parse_err}. Falling back to regex."
-                    )
-                    text = re.sub(
-                        r"<script.*?</script>|<style.*?</style>",
-                        "",
-                        html,
-                        flags=re.DOTALL | re.IGNORECASE,
-                    )
+                    logger.error(f"HTML parsing failed: {parse_err}. Falling back to regex.")
+                    text = re.sub(r"<script.*?</script>|<style.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
                     text = re.sub(r"<[^>]+>", " ", text)
                     text = re.sub(r"\s+", " ", text).strip()
                     return text[: self.max_observe]
 
-            for element in soup(
-                [
-                    "script",
-                    "style",
-                    "nav",
-                    "header",
-                    "footer",
-                    "aside",
-                    "form",
-                    "button",
-                    "iframe",
-                    "noscript",
-                    "figure",
-                    "img",
-                    "svg",
-                    "path",
-                    "meta",
-                    "link",
-                ]
-            ):
-                element.decompose()
+            # Remove noise elements that typically don't contain main content
+            for element in soup([
+                "script", "style", "nav", "header", "footer", "aside", "form",
+                "button", "iframe", "noscript", "figure", "img", "svg", "path",
+                "meta", "link", "head", "[class*=cookie]", "[class*=banner]",
+                "[class*=menu]", "[class*=sidebar]", "[class*=ad-]", "[class*=popup]",
+                "[id*=cookie]", "[id*=banner]", "[id*=menu]", "[id*=sidebar]",
+                "[id*=ad-]", "[id*=popup]"
+            ]):
+                try:
+                    element.decompose()
+                except Exception as e:
+                    logger.debug(f"Failed to remove noise element: {e}")
 
+            # Strategy 1: Look for common content containers using CSS selectors
             main_content_element = None
             selectors = [
-                "article",
-                "main",
-                ".main-content",
-                "#main-content",
-                ".post-content",
-                ".entry-content",
-                ".page-content",
-                ".content",
-                "#content",
-                ".article-body",
-                "#bodyContent",
-                ".story-content",
-                ".article",
+                "article", "main", ".main-content", "#main-content", ".post-content",
+                ".entry-content", ".page-content", ".content", "#content", ".article-body",
+                "#bodyContent", ".story-content", ".article", ".post", ".entry",
+                "[role=main]", "[itemprop=articleBody]", "[itemprop=mainContentOfPage]",
+                ".blog-post", ".news-article", ".text-content", ".main-text",
+                ".document-content", ".cms-content", ".rich-text", ".markdown-body"
             ]
+            
+            # Try each selector and pick the one with substantial content
             for selector in selectors:
                 try:
-                    element = soup.select_one(selector)
-                    if element and len(element.get_text(strip=True)) > 300:
-                        main_content_element = element
-                        logger.info(f"Found main content using selector: '{selector}'")
+                    elements = soup.select(selector)
+                    for element in elements:
+                        text_len = len(element.get_text(strip=True))
+                        if text_len > 300:
+                            # Check if this element has a good text-to-link ratio
+                            links_text = sum(len(a.get_text(strip=True)) for a in element.find_all("a"))
+                            if links_text < text_len * 0.7:  # Less than 70% of text is in links
+                                main_content_element = element
+                                logger.info(f"Found main content using selector: '{selector}' (length: {text_len})")
+                                break
+                    if main_content_element:
                         break
                 except Exception as e:
                     logger.debug(f"Selector '{selector}' failed: {e}")
 
-            if not main_content_element:  # Strategy 2: Largest text block
+            # Strategy 2: Find the largest text block with good text-to-link ratio
+            if not main_content_element:
                 largest_container = None
                 max_len = 0
-                for tag in soup.find_all(["div", "section"]):
-                    if tag.find(["article", "main"]):
-                        continue  # Avoid double counting
-                    text = tag.get_text(strip=True)
-                    text_len = len(text)
-                    if text_len > max_len and text_len > 500:
-                        links_text_len = sum(
-                            len(a.get_text(strip=True))
-                            for a in tag.find_all("a", recursive=False)
-                        )  # Less recursive link check
-                        if links_text_len < text_len * 0.6:
-                            max_len = text_len
-                            largest_container = tag
+                min_content_length = 500  # Minimum text length to consider
+                
+                # Check div and section elements for large text blocks
+                for tag in soup.find_all(["div", "section", "article", "main"]):
+                    try:
+                        # Skip elements that are likely navigation or sidebars
+                        skip_classes = ["nav", "menu", "sidebar", "footer", "header", "comment"]
+                        if any(cls in (tag.get("class", []) or []) for cls in skip_classes):
+                            continue
+                            
+                        text = tag.get_text(strip=True)
+                        text_len = len(text)
+                        
+                        if text_len > max_len and text_len > min_content_length:
+                            # Calculate text in links to avoid navigation-heavy sections
+                            links_text_len = sum(len(a.get_text(strip=True)) for a in tag.find_all("a"))
+                            
+                            # Good content should have a low percentage of text in links
+                            if links_text_len < text_len * 0.5:
+                                max_len = text_len
+                                largest_container = tag
+                    except Exception as e:
+                        logger.debug(f"Error processing tag {tag.name}: {e}")
+                        
                 if largest_container:
                     main_content_element = largest_container
-                    logger.info(
-                        f"Found main content using largest text container (len: {max_len})"
-                    )
+                    logger.info(f"Found main content using largest text container (length: {max_len})")
 
-            if not main_content_element:  # Strategy 3: Fallback to body
+            # Strategy 3: Extract paragraphs with substantial content
+            if not main_content_element:
+                paragraphs = []
+                for p in soup.find_all("p"):
+                    text = p.get_text(strip=True)
+                    if len(text) > 50:  # Only paragraphs with substantial content
+                        paragraphs.append(text)
+                
+                if paragraphs:
+                    logger.info(f"Extracted {len(paragraphs)} paragraphs with substantial content")
+                    return "\n\n".join(paragraphs)[: self.max_observe]
+
+            # Strategy 4: Fallback to body or entire document
+            if not main_content_element:
                 main_content_element = soup.body
                 if main_content_element:
                     logger.info("Using <body> as main content container.")
@@ -1315,9 +1406,25 @@ class ImprovedManus(ToolCallAgent):
                     main_content_element = soup
                     logger.warning("Could not find <body>, using entire soup.")
 
+            # Extract and clean the text from the identified content element
             if main_content_element:
+                # Get text with newlines preserved for paragraph structure
                 text = main_content_element.get_text(separator="\n", strip=True)
-                text = re.sub(r"\n\s*\n", "\n\n", text).strip()  # Clean blank lines
+                
+                # Clean up the text
+                text = re.sub(r"\n\s*\n", "\n\n", text)  # Normalize multiple newlines
+                text = re.sub(r"\s{2,}", " ", text)  # Normalize multiple spaces
+                text = re.sub(r"(\n\s*){3,}", "\n\n", text)  # Limit consecutive newlines
+                
+                # Remove common noise patterns
+                noise_patterns = [
+                    r"Cookie Policy", r"Privacy Policy", r"Terms of Service",
+                    r"All Rights Reserved", r"Copyright \d{4}", r"Accept Cookies",
+                    r"newsletter signup", r"sign up for our newsletter"
+                ]
+                for pattern in noise_patterns:
+                    text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+                
                 logger.info(f"Extracted text length: {len(text)}")
                 return text[: self.max_observe]  # Truncate before returning
             else:
@@ -1326,15 +1433,15 @@ class ImprovedManus(ToolCallAgent):
 
         except Exception as e:
             logger.error(f"Error in _extract_main_content: {e}", exc_info=True)
-            text = re.sub(
-                r"<script.*?</script>|<style.*?</style>",
-                "",
-                html,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            text = re.sub(r"<[^>]+>", " ", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            return text[: self.max_observe]
+            # Fallback to basic regex-based extraction
+            try:
+                text = re.sub(r"<script.*?</script>|<style.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text).strip()
+                return text[: self.max_observe]
+            except Exception as e2:
+                logger.error(f"Even fallback extraction failed: {e2}")
+                return "Failed to extract content from this page."
 
     async def _analyze_combined_content(
         self, combined_content: str, query: str, sources: List[Dict]
@@ -1348,19 +1455,56 @@ class ImprovedManus(ToolCallAgent):
 
         try:
             cfg = config
-            ollama_settings = getattr(cfg, "ollama", None)
-            if (
-                not ollama_settings
-                or not ollama_settings.api_base
-                or not ollama_settings.model
-            ):
-                logger.error("Ollama configuration missing. Cannot analyze content.")
-                return "Error: Ollama analysis configuration is missing."
-
-            model_name = ollama_settings.model
-            temperature = ollama_settings.temperature
-            max_tokens = ollama_settings.max_tokens or 4096
-            api_base = ollama_settings.api_base.rstrip("/")
+            
+            # Get LLM settings from config
+            llm_settings = None
+            if hasattr(cfg, 'llm') and cfg.llm:
+                # If config.llm is a dictionary of LLM settings
+                if isinstance(cfg.llm, dict):
+                    # Try to get the default LLM settings
+                    if 'default' in cfg.llm:
+                        llm_settings = cfg.llm['default']
+                    else:
+                        # Just use the first LLM settings we find
+                        for key, value in cfg.llm.items():
+                            if isinstance(value, dict) and 'api_type' in value:
+                                llm_settings = value
+                                break
+                else:
+                    # config.llm is already the LLM settings object
+                    llm_settings = cfg.llm
+            
+            # Check if we have valid LLM settings and if it's Ollama
+            api_type = None
+            api_base = None
+            model_name = None
+            temperature = 0.0
+            max_tokens = 4096
+            
+            if isinstance(llm_settings, dict):
+                api_type = llm_settings.get('api_type', '').lower()
+                api_base = llm_settings.get('base_url')
+                model_name = llm_settings.get('model')
+                temperature = llm_settings.get('temperature', 0.0)
+                max_tokens = llm_settings.get('max_tokens', 4096)
+            else:
+                api_type = getattr(llm_settings, 'api_type', '').lower()
+                api_base = getattr(llm_settings, 'base_url', None)
+                model_name = getattr(llm_settings, 'model', None)
+                temperature = getattr(llm_settings, 'temperature', 0.0)
+                max_tokens = getattr(llm_settings, 'max_tokens', 4096)
+            
+            # Verify it's Ollama with all required settings
+            if api_type != 'ollama' or not api_base or not model_name:
+                logger.error(f"Ollama configuration missing or incomplete: api_type={api_type}, base_url={api_base}, model={model_name}")
+                return "Error: Ollama analysis configuration is missing or incomplete."
+            
+            # Adjust the API base URL if it contains '/v1' (OpenAI-style versioning)
+            if '/v1' in api_base:
+                api_base = api_base.replace('/v1', '')
+                logger.info(f"Adjusted API base URL for Ollama: {api_base}")
+                
+            api_base = api_base.rstrip("/")
             ollama_url = f"{api_base}/api/generate"
             logger.info(
                 f"Using Ollama: URL={ollama_url}, Model={model_name}, Temp={temperature}, MaxTokens={max_tokens}"
@@ -1595,17 +1739,43 @@ Provide a concise, well-structured response. If the content doesn't answer the q
 
         logger.info("🛡️ Finished overlay handling attempts.")
 
+        return valid_urls
+
     def _extract_urls(self, text: str) -> List[str]:
-        """Extract all URLs from the given text using a more robust regex."""
+        """Extract all URLs from the given text using robust regex patterns."""
         if not text:
             return []
-        # Regex to find URLs, avoiding trailing punctuation common in text
-        url_pattern = (
-            r'https?://[^\s()<>"\'`]+?(?:[\]\)]*[^\s`!()\[\]{};:\'".,<>?«»“”‘’]|$)'
-        )
+            
+        # Standard http/https URLs pattern
+        url_pattern = r'https?://[^\s()<>]+'
+        
+        # Also look for www. URLs without http/https
+        www_pattern = r'\b(www\.[^\s()<>]+\.[a-zA-Z]{2,})'
+        
+        # Combine results from both patterns
         urls = re.findall(url_pattern, text)
-        # Basic validation: ensure it has a domain part
-        valid_urls = [u for u in urls if "." in urlparse(u).netloc]
+        www_urls = re.findall(www_pattern, text)
+        
+        # Process www URLs to add https:// prefix
+        for www_url in www_urls:
+            if www_url.startswith('www.'):
+                urls.append('https://' + www_url)
+        
+        # Basic validation and deduplication while preserving order
+        seen = set()
+        valid_urls = []
+        for url in urls:
+            try:
+                # Decode URL-encoded characters
+                url = unquote(url)
+                parsed = urlparse(url)
+                # Ensure it has a domain part with at least one dot
+                if "." in parsed.netloc and url not in seen:
+                    valid_urls.append(url)
+                    seen.add(url)
+            except Exception as e:
+                logger.debug(f"Error processing URL {url}: {e}")
+                
         return valid_urls
 
     def _should_use_browser(self, user_message: str) -> bool:
@@ -1661,10 +1831,8 @@ Provide a concise, well-structured response. If the content doesn't answer the q
 
         # Check using PersistentMemory's similarity check
         try:
-            # Assuming is_similar_question is synchronous and takes threshold
-            if self.conversation_memory.is_similar_question(
-                question_norm, threshold=0.9
-            ):
+            # is_similar_question is synchronous and doesn't take threshold
+            if self.conversation_memory.is_similar_question(question_norm):
                 logger.warning(
                     f"🔄 Avoiding redundant question (memory similarity): {question}"
                 )
@@ -1729,6 +1897,7 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             args = json.loads(args_str)
             editor_command = args.get("command")
             path_str = args.get("path")
+            file_text = args.get("file_text", "")
 
             if not path_str:
                 return "Error executing str_replace_editor: Missing 'path' parameter"
@@ -1740,28 +1909,55 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                 logger.error(f"Security Alert: Path outside workspace: {target_path}")
                 return f"Error: Access denied. Path '{path_str}' is outside workspace."
 
+            # Check if this is a creative content task that needs generation
+            if editor_command == "create" and file_text and len(file_text) < 100 and self._is_creative_content_description(file_text):
+                generated_content = await self._generate_creative_content(file_text)
+                if generated_content:
+                    # Replace the description with the actual generated content
+                    args["file_text"] = generated_content
+                    command.function.arguments = json.dumps(args)
+                    logger.info(f"Generated creative content for '{file_text}'")
+
             logger.info(
                 f"Executing str_replace_editor: cmd='{editor_command}', path='{target_path}'"
             )
 
+            # Create the file if it doesn't exist for viewing
             if editor_command == "view" and not target_path.exists():
                 try:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     target_path.touch()
                     logger.info(f"📄 Created missing file for viewing: {target_path}")
+                    # Update args to include the status message
+                    args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
+                    args_with_message["message"] = "Created missing file"
                     self.tool_tracker.record_tool_usage(
-                        "str_replace_editor", args, "success", "Created missing file"
+                        "str_replace_editor", args_with_message, "success"
                     )
                     return f"Observed output of cmd `str_replace_editor`: File '{path_str}' did not exist and was created empty."
                 except Exception as e:
                     logger.error(f"Failed to create missing file {target_path}: {e}")
+                    # Update args to include the status message
+                    args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
+                    args_with_message["message"] = f"Failed to create missing file: {e}"
                     self.tool_tracker.record_tool_usage(
                         "str_replace_editor",
-                        args,
-                        "failure",
-                        f"Failed to create missing file: {e}",
+                        args_with_message,
+                        "failure"
                     )
                     return f"Error executing str_replace_editor: Failed to create file '{path_str}'. {str(e)}"
+                    
+            # Handle 'create' command when file already exists by using 'str_replace' instead
+            if editor_command == "create" and target_path.exists():
+                logger.info(f"File already exists at {target_path}, using 'str_replace' instead of 'create'")
+                # Modify the command to 'str_replace' instead of 'create'
+                file_text = args.get("file_text", "")
+                args["command"] = "str_replace"
+                args["original"] = ""  # Replace the entire content
+                args["replacement"] = file_text
+                command.function.arguments = json.dumps(args)
+                logger.info(f"Modified command from 'create' to 'str_replace' for existing file: {target_path}")
+                # Continue with the modified command
 
             # Execute original command via base class
             result_str = await super().execute_tool(command)
@@ -1782,10 +1978,102 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             logger.error(
                 f"Unexpected error in _handle_str_replace_editor: {e}", exc_info=True
             )
+            args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
+            args_with_message["message"] = f"Outer handler error: {str(e)}"
             self.tool_tracker.record_tool_usage(
-                "str_replace_editor", args, "failure", f"Outer handler error: {str(e)}"
+                "str_replace_editor", args_with_message, "failure"
             )
             return f"Error executing str_replace_editor: Unexpected error. {str(e)}"
+            
+    def _is_creative_content_description(self, text: str) -> bool:
+        """Determine if the text is a description of creative content that needs to be generated."""
+        # Check for common patterns that indicate a creative content description
+        creative_indicators = [
+            "poem about", "write a poem", "create a poem", "in the style of", 
+            "story about", "write a story", "create a story",
+            "essay on", "write an essay", "create an essay",
+            "song about", "write a song", "create a song",
+            "script for", "write a script", "create a script"
+        ]
+        
+        text_lower = text.lower()
+        return any(indicator in text_lower for indicator in creative_indicators)
+    
+    async def _generate_creative_content(self, description: str) -> str:
+        """Generate creative content based on the description."""
+        try:
+            logger.info(f"Generating creative content for: {description}")
+            
+            # Determine the type of creative content
+            content_type = "poem"  # Default
+            if "poem" in description.lower():
+                content_type = "poem"
+            elif "story" in description.lower():
+                content_type = "story"
+            elif "essay" in description.lower():
+                content_type = "essay"
+            elif "song" in description.lower():
+                content_type = "song"
+            elif "script" in description.lower():
+                content_type = "script"
+            
+            # Extract style information if present
+            style_match = re.search(r"in the style of ([^,\.]+)", description, re.IGNORECASE)
+            style = style_match.group(1) if style_match else ""
+            
+            # Create a prompt for the LLM to generate the content
+            prompt = f"Create a {content_type} based on this description: {description}"
+            if style:
+                prompt += f". Make sure to follow the style of {style}."
+            prompt += " Be creative and detailed."
+            
+            # Use the LLM to generate the content
+            # Create a message for the LLM
+            messages = [
+                {"role": "user", "content": prompt}
+            ]
+            
+            # Use the ask method instead of agenerate_text
+            response = await self.llm.ask(messages, stream=False)
+            
+            if response and len(response) > 0:
+                logger.info(f"Successfully generated {content_type} of length {len(response)}")
+                return response
+            else:
+                logger.warning(f"Failed to generate content for: {description}")
+                # Fallback content
+                return f"""# {description.capitalize()}
+
+{self._create_fallback_content(content_type, description)}"""
+        except Exception as e:
+            logger.error(f"Error generating creative content: {e}")
+            return f"""# {description.capitalize()}
+
+Unable to generate content due to an error."""
+    
+    def _create_fallback_content(self, content_type: str, description: str) -> str:
+        """Create fallback content when generation fails."""
+        if content_type == "poem":
+            return """Verses flow like ancient streams,
+Words paint pictures, capture dreams.
+Thoughts and feelings intertwined,
+In rhythmic patterns, carefully designed."""
+        elif content_type == "story":
+            return """Once upon a time, in a world not unlike our own, a tale began to unfold. 
+Characters emerged from the mist of imagination, each with their own desires and challenges.
+Their journey would take them through valleys of despair and mountains of triumph."""
+        elif content_type == "essay":
+            return """Introduction:
+This essay explores the multifaceted dimensions of the subject at hand.
+
+Main Body:
+Various perspectives must be considered when examining this topic.
+Evidence suggests several key factors are at play.
+
+Conclusion:
+In summary, the complexity of this subject invites further exploration and discussion."""
+        else:
+            return f"This is a placeholder for the {content_type} about {description.split('about')[1].strip() if 'about' in description else description}."
 
     async def _handle_python_execute(self, command: ToolCall) -> str:
         """Special handler for python_execute: adds error handling wrapper."""
@@ -2094,9 +2382,9 @@ except Exception as e:
 
         # 2. Relevant Memories
         try:
-            # Use semantic search (assuming sync for simplicity, adjust if async)
-            relevant_memories = self.conversation_memory.search_memories_semantic(
-                self.current_task, limit=4, threshold=0.7
+            # Use semantic search (this is an async method)
+            relevant_memories = await self.conversation_memory.search_memories_semantic(
+                self.current_task, limit=4
             )
             if relevant_memories:
                 mem_items = [

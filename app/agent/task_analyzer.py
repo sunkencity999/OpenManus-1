@@ -63,8 +63,43 @@ class TaskAnalyzer:
         plan = TaskPlan(task_description=task_description)
         
         # This is where we'd use the LLM to break down the task
-        # For now, we'll just create a simple plan
-        if "file" in task_description.lower():
+        # For now, we'll create a simple plan based on task type
+        task_lower = task_description.lower()
+        
+        # Check for creative content tasks
+        if any(keyword in task_lower for keyword in ["poem", "story", "essay", "song", "script"]):
+            # This is a creative content task
+            creative_type = "content"
+            if "poem" in task_lower:
+                creative_type = "poem"
+            elif "story" in task_lower:
+                creative_type = "story"
+            elif "essay" in task_lower:
+                creative_type = "essay"
+            elif "song" in task_lower:
+                creative_type = "song"
+            elif "script" in task_lower:
+                creative_type = "script"
+                
+            # Determine if there's a file save request
+            save_to_file = False
+            if any(keyword in task_lower for keyword in ["save", "write to", "create file", ".txt", ".md"]):
+                save_to_file = True
+                
+            # Create a plan for creative content generation
+            plan.steps = [
+                TaskStep(
+                    description="Understand creative content requirements",
+                    required_context=["subject", "style", "tone"],
+                    tools=["ask_human"]
+                ),
+                TaskStep(
+                    description="Generate creative content",
+                    required_context=["subject", "style", "tone"],
+                    tools=["str_replace_editor" if save_to_file else "none"]
+                )
+            ]
+        elif "file" in task_lower:
             plan.steps = [
                 TaskStep(
                     description="Identify target file",

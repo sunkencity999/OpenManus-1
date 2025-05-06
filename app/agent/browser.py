@@ -20,6 +20,26 @@ class BrowserContextHelper:
         self.agent = agent
         self._current_base64_image: Optional[str] = None
 
+    def get_current_url(self) -> Optional[str]:
+        """Get the current URL from the browser state."""
+        # This is a synchronous method that returns the current URL if available
+        # It's used in contexts where we can't await an async method
+        try:
+            # Check if we have a browser tool available
+            browser_tool = self.agent.available_tools.get_tool(BrowserUseTool().name)
+            if not browser_tool:
+                return None
+                
+            # If the browser tool has a current_url attribute, use that
+            if hasattr(browser_tool, "current_url"):
+                return browser_tool.current_url
+                
+            # Otherwise return None
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get current URL: {str(e)}")
+            return None
+    
     async def get_browser_state(self) -> Optional[dict]:
         browser_tool = self.agent.available_tools.get_tool(BrowserUseTool().name)
         if not browser_tool or not hasattr(browser_tool, "get_current_state"):

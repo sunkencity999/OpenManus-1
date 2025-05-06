@@ -218,6 +218,9 @@ class ToolUsageTracker(BaseModel):
     # Track tool success/failure
     tool_outcomes: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     
+    # Track asked questions to avoid repetition
+    asked_questions: List[str] = Field(default_factory=list)
+    
     def record_tool_usage(self, tool_name: str, args: Dict[str, Any], outcome: str = "success") -> None:
         """Record that a tool was used."""
         # Increment usage count
@@ -261,8 +264,68 @@ class ToolUsageTracker(BaseModel):
         failure_rate = outcomes.get("failure", 0) / total
         return failure_rate > 0.7  # Avoid tools with high failure rates
     
+    def was_question_asked(self, question: str) -> bool:
+        """Check if a similar question has already been asked.
+        
+        Args:
+            question: The question to check
+            
+        Returns:
+            True if a similar question has been asked before, False otherwise
+        """
+        # Simple implementation using string similarity
+        # In a real implementation, use embedding similarity or more sophisticated NLP
+        for asked in self.asked_questions:
+            # Calculate similarity (simple implementation)
+            similarity = self._calculate_similarity(question, asked)
+            if similarity > 0.8:  # Threshold for similarity
+                return True
+        return False
+        
+    def record_question(self, question: str) -> None:
+        """Record a question that was asked.
+        
+        Args:
+            question: The question that was asked
+        """
+        # Normalize the question
+        question = question.strip().lower()
+        
+        # Only add if it's not already in the list
+        if not self.was_question_asked(question):
+            self.asked_questions.append(question)
+    
+    def _calculate_similarity(self, str1: str, str2: str) -> float:
+        """Calculate similarity between two strings.
+        
+        This is a very simple implementation. In a real system, use embeddings.
+        
+        Args:
+            str1: First string
+            str2: Second string
+            
+        Returns:
+            Similarity score between 0 and 1
+        """
+        # Normalize strings
+        str1 = str1.lower()
+        str2 = str2.lower()
+        
+        # Simple word overlap similarity
+        words1 = set(str1.split())
+        words2 = set(str2.split())
+        
+        if not words1 or not words2:
+            return 0.0
+            
+        overlap = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return overlap / union if union > 0 else 0.0
+    
     def reset(self) -> None:
         """Reset the tool usage tracker."""
         self.used_tools = {}
         self.tool_patterns = {}
         self.tool_outcomes = {}
+        self.asked_questions = []

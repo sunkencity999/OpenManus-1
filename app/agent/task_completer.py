@@ -85,6 +85,9 @@ class TaskCompleter(BaseModel):
         elif "poem" in task_lower or "poetry" in task_lower:
             self.task_type = "poem"
             self.task_requirements = ["subject", "style", "tone"]
+            
+            # Extract information from the task description
+            self._extract_creative_content_info(task_description)
         elif "research report" in task_lower or "research paper" in task_lower:
             self.task_type = "research_report"
             self.task_requirements = [
@@ -163,6 +166,111 @@ class TaskCompleter(BaseModel):
         self.is_complete = covered_requirements >= min_requirements
         if self.is_complete:
             logger.warning(f"🎉 Task has sufficient information to complete! ({covered_requirements}/{len(self.task_requirements)} requirements)")
+    
+    def get_missing_info(self) -> List[str]:
+        """Return a list of requirements that haven't been gathered yet."""
+        missing_info = []
+        
+        for req in self.task_requirements:
+            # Check if we have direct info for this requirement
+            if req not in self.gathered_info:
+                # Check if we have info that might cover this requirement
+                covered = False
+                for key in self.gathered_info:
+                    if req in key or key in req:
+                        covered = True
+                        break
+                        
+                if not covered:
+                    missing_info.append(req)
+        
+        return missing_info
+    
+    def _extract_creative_content_info(self, task_description: str) -> None:
+        """Extract creative content information from the task description."""
+        task_lower = task_description.lower()
+        
+        # Extract subject information
+        subject_patterns = [
+            r"(?:poem|poetry|write)\s+about\s+([^\.,;]+)",
+            r"(?:poem|poetry|write)\s+on\s+([^\.,;]+)",
+            r"(?:create|generate|make)\s+a\s+poem\s+about\s+([^\.,;]+)",
+            r"(?:create|generate|make)\s+a\s+poem\s+on\s+([^\.,;]+)"
+        ]
+        
+        for pattern in subject_patterns:
+            match = re.search(pattern, task_lower)
+            if match:
+                subject = match.group(1).strip()
+                self.gathered_info["subject"] = subject
+                self.logger.warning(f"📋 Extracted subject: {subject}")
+                break
+        
+        # Extract style information
+        style_patterns = [
+            r"in\s+the\s+style\s+of\s+([^\.,;]+)",
+            r"like\s+(?:a|an)\s+([^\.,;]+)\s+poem",
+            r"(?:similar|alike|akin)\s+to\s+([^\.,;]+)",
+            r"(?:following|using)\s+the\s+([^\.,;]+)\s+style"
+        ]
+        
+        for pattern in style_patterns:
+            match = re.search(pattern, task_lower)
+            if match:
+                style = match.group(1).strip()
+                self.gathered_info["style"] = style
+                self.logger.warning(f"📋 Extracted style: {style}")
+                break
+        
+        # Extract tone information
+        tone_patterns = [
+            r"with\s+a\s+([a-z]+)\s+tone",
+            r"in\s+a\s+([a-z]+)\s+(?:tone|manner|way|voice)",
+            r"that\s+is\s+([a-z]+)\s+in\s+tone"
+        ]
+        
+        tone_keywords = ["happy", "sad", "melancholic", "joyful", "serious", "humorous", 
+                      "dark", "light", "somber", "playful", "reflective", "nostalgic",
+                      "romantic", "dramatic", "ironic", "satirical"]
+        
+        # Check for explicit tone patterns
+        tone_found = False
+        for pattern in tone_patterns:
+            match = re.search(pattern, task_lower)
+            if match:
+                tone = match.group(1).strip()
+                self.gathered_info["tone"] = tone
+                self.logger.warning(f"📋 Extracted tone: {tone}")
+                tone_found = True
+                break
+        
+        # Check for tone keywords if no explicit pattern was found
+        if not tone_found:
+            for tone in tone_keywords:
+                if tone in task_lower:
+                    self.gathered_info["tone"] = tone
+                    self.logger.warning(f"📋 Extracted tone: {tone}")
+                    break
+    
+    def is_ready_to_complete(self) -> bool:
+        """Check if the task is ready to be completed based on gathered information."""
+        # For simplicity, consider task ready to complete if we have info for at least half the requirements
+        min_requirements = len(self.task_requirements) // 2
+        covered_requirements = 0
+        
+        for req in self.task_requirements:
+            # Check if we have direct info for this requirement
+            if req in self.gathered_info:
+                covered_requirements += 1
+                continue
+                
+            # Check if we have info that might cover this requirement
+            for key in self.gathered_info:
+                if req in key or key in req:
+                    covered_requirements += 1
+                    break
+        
+        return covered_requirements >= min_requirements
     
     def should_complete_task(self) -> bool:
         """Determine if it's time to complete the task."""

@@ -85,3 +85,13 @@ class SmartAskHuman(BaseTool):
         """Reset for a new task."""
         if self._context_manager:
             self._context_manager.reset_for_new_task()
+            
+    def get_answered_questions(self) -> List[str]:
+        """Get a list of questions that have been answered.
+        
+        Returns:
+            A list of questions that have been asked and answered
+        """
+        if self._context_manager and hasattr(self._context_manager, 'get_questions'):
+            return self._context_manager.get_questions()
+        return []
