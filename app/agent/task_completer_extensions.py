@@ -1,0 +1,365 @@
+"""
+Task Completer Extensions for LocalManus
+
+This module contains the implementation of additional task types for the TaskCompleter class.
+These methods are imported and added to the TaskCompleter class to support a wider range of tasks.
+"""
+
+def _create_technical_documentation(self) -> str:
+    """Create technical documentation deliverable."""
+    # Technical documentation template
+    template = """
+# {product_name} Documentation
+Version: {version}
+
+## Overview
+{purpose}
+
+## Installation
+{installation}
+
+## Usage
+{usage_examples}
+
+## API Reference
+{api_endpoints}
+
+### Parameters
+{parameters}
+
+## Troubleshooting
+{troubleshooting}
+
+## Additional Resources
+{additional_resources}
+"""
+    
+    # Fill in the template with gathered information
+    product_name = self.gathered_info.get("product_name", self._extract_product_name())
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "product_name": product_name,
+        "version": self.gathered_info.get("version", "1.0.0"),
+        "purpose": self.gathered_info.get("purpose", 
+                                     f"{product_name} is a tool designed to help users accomplish their tasks efficiently."),
+        "installation": self.gathered_info.get("installation", 
+                                          f"```\npip install {product_name.lower()}\n```"),
+        "usage_examples": self.gathered_info.get("usage_examples", 
+                                            f"```python\nimport {product_name.lower()}\n\n# Example usage\nresult = {product_name.lower()}.process('example input')\nprint(result)\n```"),
+        "api_endpoints": self.gathered_info.get("api_endpoints", 
+                                           f"### `{product_name.lower()}.process(input_data)`\nProcesses the input data and returns a result."),
+        "parameters": self.gathered_info.get("parameters", 
+                                        "- `input_data` (str): The input data to process.\n- `options` (dict, optional): Additional options for processing."),
+        "troubleshooting": self.gathered_info.get("troubleshooting", 
+                                             "If you encounter any issues, please check the following:\n- Ensure you have the correct version installed\n- Verify your input format\n- Check the logs for error messages"),
+        "additional_resources": self.gathered_info.get("additional_resources", 
+                                                  f"- [GitHub Repository](https://github.com/example/{product_name.lower()})\n- [Official Website](https://example.com/{product_name.lower()})")
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created technical documentation deliverable ({len(deliverable)} chars)")
+    return deliverable
+
+def _create_content_summary(self) -> str:
+    """Create a content summary deliverable."""
+    # Content summary template
+    template = """
+# Summary: {title}
+
+## Key Points
+{key_points}
+
+## Summary
+{summary}
+
+## Audience Takeaways
+{audience_takeaways}
+"""
+    
+    # Fill in the template with gathered information
+    source_content = self.gathered_info.get("source_content", "")
+    title = self.gathered_info.get("title", self._extract_product_name())
+    
+    # Extract length preference if available
+    length_preference = self.gathered_info.get("length", "medium")
+    summary_length = {
+        "short": "A brief summary of the key points.",
+        "medium": "A comprehensive overview of the main ideas and supporting details.",
+        "long": "A detailed summary covering all major points and significant supporting information."
+    }.get(length_preference.lower(), "A comprehensive overview of the main ideas and supporting details.")
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "title": title,
+        "key_points": self.gathered_info.get("key_points", 
+                                        "- Key point 1\n- Key point 2\n- Key point 3"),
+        "summary": self.gathered_info.get("summary", 
+                                     summary_length),
+        "audience_takeaways": self.gathered_info.get("audience_takeaways", 
+                                                self.gathered_info.get("takeaways", 
+                                                                  f"What the {self.gathered_info.get('audience', 'reader')} should remember from this content."))
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created content summary deliverable ({len(deliverable)} chars)")
+    return deliverable
+
+def _create_data_analysis(self) -> str:
+    """Create a data analysis report deliverable."""
+    # Data analysis template
+    template = """
+# Data Analysis Report: {title}
+
+## Executive Summary
+{executive_summary}
+
+## Dataset Description
+{dataset_description}
+
+## Methodology
+{methodology}
+
+## Findings
+{findings}
+
+## Visualizations
+{visualizations}
+
+## Statistical Analysis
+{statistical_analysis}
+
+## Conclusions
+{conclusions}
+
+## Recommendations
+{recommendations}
+"""
+    
+    # Fill in the template with gathered information
+    title = self.gathered_info.get("title", self.gathered_info.get("analysis_goal", "Data Analysis"))
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "title": title,
+        "executive_summary": self.gathered_info.get("executive_summary", 
+                                               f"This report presents an analysis of {self.gathered_info.get('dataset', 'the dataset')} with the goal of {self.gathered_info.get('analysis_goal', 'understanding key patterns and insights')}."),
+        "dataset_description": self.gathered_info.get("dataset_description", 
+                                                 self.gathered_info.get("dataset", "The dataset used for this analysis contains information about [describe dataset variables and structure].") +
+                                                 f"\n\nVariables analyzed: {self.gathered_info.get('variables', '[list key variables]')}"),
+        "methodology": self.gathered_info.get("methodology", 
+                                         self.gathered_info.get("methods", "The analysis employed statistical methods including descriptive statistics, correlation analysis, and visualization techniques.")),
+        "findings": self.gathered_info.get("findings", 
+                                      "The analysis revealed the following key findings:\n\n1. Finding 1\n2. Finding 2\n3. Finding 3"),
+        "visualizations": self.gathered_info.get("visualizations", 
+                                            "[Insert visualizations here - charts, graphs, etc.]"),
+        "statistical_analysis": self.gathered_info.get("statistical_analysis", 
+                                                  "Statistical tests performed:\n\n- Descriptive statistics (mean, median, standard deviation)\n- Correlation analysis\n- Hypothesis testing"),
+        "conclusions": self.gathered_info.get("conclusions", 
+                                         "Based on the analysis, we can conclude that [key conclusions about the data and what it reveals]."),
+        "recommendations": self.gathered_info.get("recommendations", 
+                                             "Based on the findings, the following recommendations are proposed:\n\n1. Recommendation 1\n2. Recommendation 2\n3. Recommendation 3")
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created data analysis report deliverable ({len(deliverable)} chars)")
+    return deliverable
+
+def _create_blog_post(self) -> str:
+    """Create a blog post deliverable."""
+    # Blog post template
+    template = """
+# {title}
+
+*{date} · {reading_time} min read*
+
+![{featured_image_alt}]({featured_image_url})
+
+{introduction}
+
+## {section1_title}
+{section1_content}
+
+## {section2_title}
+{section2_content}
+
+## {section3_title}
+{section3_content}
+
+## Conclusion
+{conclusion}
+
+---
+
+*{author_bio}*
+
+**Tags:** {tags}
+"""
+    
+    # Fill in the template with gathered information
+    topic = self.gathered_info.get("topic", self._extract_product_name())
+    title = self.gathered_info.get("title", f"Everything You Need to Know About {topic}")
+    
+    # Generate current date
+    import datetime
+    current_date = datetime.datetime.now().strftime("%B %d, %Y")
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "title": title,
+        "date": self.gathered_info.get("date", current_date),
+        "reading_time": self.gathered_info.get("reading_time", "5"),
+        "featured_image_alt": self.gathered_info.get("featured_image_alt", f"{topic} featured image"),
+        "featured_image_url": self.gathered_info.get("featured_image_url", "https://example.com/image.jpg"),
+        "introduction": self.gathered_info.get("introduction", 
+                                          f"In this article, we'll explore {topic} and why it matters. {self.gathered_info.get('key_points', 'We will cover the essential aspects and provide actionable insights.')}"),
+        "section1_title": self.gathered_info.get("section1_title", "Background"),
+        "section1_content": self.gathered_info.get("section1_content", f"Let's start by understanding what {topic} is and why it's important."),
+        "section2_title": self.gathered_info.get("section2_title", "Key Considerations"),
+        "section2_content": self.gathered_info.get("section2_content", f"When dealing with {topic}, there are several important factors to consider."),
+        "section3_title": self.gathered_info.get("section3_title", "Best Practices"),
+        "section3_content": self.gathered_info.get("section3_content", f"Here are some best practices for {topic} that you can implement right away."),
+        "conclusion": self.gathered_info.get("conclusion", 
+                                        f"To summarize, {topic} is a crucial aspect that deserves attention. By following the guidelines outlined in this article, you'll be well-equipped to handle it effectively. {self.gathered_info.get('call_to_action', 'Start implementing these strategies today and see the difference they make!')}"),
+        "author_bio": self.gathered_info.get("author_bio", "Written by an expert in the field with over 10 years of experience."),
+        "tags": self.gathered_info.get("tags", self.gathered_info.get("seo_keywords", f"{topic}, guide, best practices"))
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created blog post deliverable ({len(deliverable)} chars)")
+    return deliverable
+
+def _create_email_content(self) -> str:
+    """Create email content deliverable."""
+    # Email content template
+    template = """
+# Email: {subject_line}
+
+**To:** {recipient}
+**From:** {sender}
+**Subject:** {subject_line}
+
+Dear {recipient_name},
+
+{opening}
+
+{body}
+
+{closing}
+
+{signature}
+
+---
+
+**Purpose:** {purpose}
+**Call to Action:** {call_to_action}
+"""
+    
+    # Fill in the template with gathered information
+    purpose = self.gathered_info.get("purpose", "To inform the recipient about important information")
+    recipient = self.gathered_info.get("recipient", "Valued Customer")
+    recipient_name = self.gathered_info.get("recipient_name", recipient.split('@')[0] if '@' in recipient else recipient)
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "subject_line": self.gathered_info.get("subject_line", f"Important Information About {self._extract_product_name()}"),
+        "recipient": recipient,
+        "sender": self.gathered_info.get("sender", "Your Name <your.email@example.com>"),
+        "recipient_name": recipient_name,
+        "opening": self.gathered_info.get("opening", f"I hope this email finds you well. I'm reaching out regarding {self._extract_product_name()}."),
+        "body": self.gathered_info.get("body", 
+                                  self.gathered_info.get("key_message", f"We have some important updates about {self._extract_product_name()} that we wanted to share with you.")),
+        "closing": self.gathered_info.get("closing", "Thank you for your attention to this matter. Please don't hesitate to reach out if you have any questions."),
+        "signature": self.gathered_info.get("signature", "Best regards,\n[Your Name]\n[Your Position]\n[Your Contact Information]"),
+        "purpose": purpose,
+        "call_to_action": self.gathered_info.get("call_to_action", "Please review the information and respond by [date].")
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created email content deliverable ({len(deliverable)} chars)")
+    return deliverable
+
+def _create_social_media_content(self) -> str:
+    """Create social media content deliverable."""
+    # Social media content template
+    template = """
+# Social Media Content: {platform}
+
+## Post
+{post_content}
+
+## Hashtags
+{hashtags}
+
+## Image Description
+{image_description}
+
+## Call to Action
+{call_to_action}
+
+## Posting Schedule
+{posting_schedule}
+
+## Engagement Strategy
+{engagement_strategy}
+"""
+    
+    # Fill in the template with gathered information
+    platform = self.gathered_info.get("platform", "Twitter")
+    topic = self._extract_product_name()
+    
+    # Adjust content length based on platform
+    platform_limits = {
+        "twitter": 280,
+        "instagram": 2200,
+        "facebook": 5000,
+        "linkedin": 3000
+    }
+    
+    platform_key = platform.lower()
+    if platform_key in ["twitter", "x"]:
+        platform_key = "twitter"
+        platform_display = "Twitter/X"
+    else:
+        platform_display = platform
+    
+    char_limit = platform_limits.get(platform_key, 1000)
+    
+    # Default post content based on platform
+    default_post = f"Excited to share our latest updates about {topic}! Check out the link below to learn more. #NewAnnouncement"
+    if len(default_post) > char_limit:
+        default_post = default_post[:char_limit-3] + "..."
+    
+    # For each section, use gathered info or generate placeholder
+    sections = {
+        "platform": platform_display,
+        "post_content": self.gathered_info.get("post_content", 
+                                          self.gathered_info.get("key_message", default_post)),
+        "hashtags": self.gathered_info.get("hashtags", f"#{topic.replace(' ', '')} #NewAnnouncement #Update"),
+        "image_description": self.gathered_info.get("image_description", f"[Image showing {topic} with engaging visuals]"),
+        "call_to_action": self.gathered_info.get("call_to_action", "Click the link to learn more"),
+        "posting_schedule": self.gathered_info.get("posting_schedule", "Best times to post:\n- Weekdays: 12 PM - 1 PM\n- Weekends: 10 AM - 11 AM"),
+        "engagement_strategy": self.gathered_info.get("engagement_strategy", "- Respond to comments within 2 hours\n- Ask questions to encourage discussion\n- Share user-generated content when available")
+    }
+    
+    # Fill in the template
+    deliverable = template.format(**sections)
+    self.deliverable_content = deliverable
+    
+    self.logger.warning(f"📝 Created social media content deliverable ({len(deliverable)} chars)")
+    return deliverable

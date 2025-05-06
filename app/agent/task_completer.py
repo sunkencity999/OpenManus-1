@@ -4,10 +4,27 @@ Task completion manager to ensure agents finish their assigned tasks.
 from typing import Dict, List, Optional, Set, Any
 import re
 import logging
+import importlib.util
+import os
 from pydantic import BaseModel, Field
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Check if task_completer_extensions.py exists
+extensions_path = os.path.join(os.path.dirname(__file__), "task_completer_extensions.py")
+HAS_EXTENSIONS = os.path.exists(extensions_path)
+
+# Import extensions if available
+if HAS_EXTENSIONS:
+    try:
+        spec = importlib.util.spec_from_file_location("task_completer_extensions", extensions_path)
+        extensions_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extensions_module)
+        logger.info("Successfully loaded task completer extensions")
+    except Exception as e:
+        logger.error(f"Error loading task completer extensions: {str(e)}")
+        HAS_EXTENSIONS = False
 
 
 class TaskCompleter(BaseModel):
@@ -17,17 +34,35 @@ class TaskCompleter(BaseModel):
     """
     
     # Track task type and requirements
-    task_type: str = ""
+    task_type: str = Field(default="")
     task_requirements: List[str] = Field(default_factory=list)
     
     # Track gathered information
     gathered_info: Dict[str, str] = Field(default_factory=dict)
     
     # Track completion status
-    is_complete: bool = False
+    is_complete: bool = Field(default=False)
     
     # Track deliverable content
-    deliverable_content: str = ""
+    deliverable_content: str = Field(default="")
+    
+    # Track logger
+    logger: Any = Field(default_factory=lambda: logging.getLogger(__name__))
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        
+        # Dynamically add extension methods if available
+        if HAS_EXTENSIONS:
+            try:
+                # Add all methods from extensions that start with _create_
+                for method_name in dir(extensions_module):
+                    if method_name.startswith('_create_'):
+                        method = getattr(extensions_module, method_name)
+                        setattr(TaskCompleter, method_name, method)
+                self.logger.info(f"Added extension methods to TaskCompleter")
+            except Exception as e:
+                self.logger.error(f"Error adding extension methods: {str(e)}")
     
     def analyze_task(self, task_description: str) -> None:
         """Analyze the task to determine type and requirements."""
@@ -50,6 +85,47 @@ class TaskCompleter(BaseModel):
         elif "poem" in task_lower or "poetry" in task_lower:
             self.task_type = "poem"
             self.task_requirements = ["subject", "style", "tone"]
+        elif "research report" in task_lower or "research paper" in task_lower:
+            self.task_type = "research_report"
+            self.task_requirements = [
+                "topic", "background", "methodology", "findings", 
+                "analysis", "conclusion", "references"
+            ]
+        elif "technical documentation" in task_lower or "api doc" in task_lower or "user guide" in task_lower:
+            self.task_type = "technical_documentation"
+            self.task_requirements = [
+                "product_name", "version", "purpose", "installation", 
+                "usage_examples", "api_endpoints", "parameters"
+            ]
+        elif "summary" in task_lower or "summarize" in task_lower or "summarization" in task_lower:
+            self.task_type = "content_summary"
+            self.task_requirements = [
+                "source_content", "key_points", "length", "audience"
+            ]
+        elif "data analysis" in task_lower or "analyze data" in task_lower or "statistics" in task_lower:
+            self.task_type = "data_analysis"
+            self.task_requirements = [
+                "dataset", "variables", "analysis_goal", "methods", 
+                "findings", "visualizations", "recommendations"
+            ]
+        elif "blog post" in task_lower or "article" in task_lower:
+            self.task_type = "blog_post"
+            self.task_requirements = [
+                "topic", "target_audience", "tone", "key_points", 
+                "call_to_action", "seo_keywords"
+            ]
+        elif "email" in task_lower or "newsletter" in task_lower:
+            self.task_type = "email_content"
+            self.task_requirements = [
+                "purpose", "recipient", "subject_line", "key_message", 
+                "tone", "call_to_action"
+            ]
+        elif "social media" in task_lower or "tweet" in task_lower or "post" in task_lower:
+            self.task_type = "social_media"
+            self.task_requirements = [
+                "platform", "purpose", "tone", "key_message", 
+                "hashtags", "call_to_action"
+            ]
         else:
             # Generic research task
             self.task_type = "research"
@@ -93,14 +169,28 @@ class TaskCompleter(BaseModel):
         return self.is_complete and not self.deliverable_content
     
     def create_deliverable(self) -> str:
-        """Create the final deliverable based on gathered information."""
+        """Create a deliverable based on the task type and gathered information."""
         if self.task_type == "marketing_plan":
             return self._create_marketing_plan()
         elif self.task_type == "business_plan":
             return self._create_business_plan()
         elif self.task_type == "poem":
             return self._create_poem()
-        else:
+        elif self.task_type == "research_report":
+            return self._create_research_report()
+        elif self.task_type == "technical_documentation":
+            return self._create_technical_documentation()
+        elif self.task_type == "content_summary":
+            return self._create_content_summary()
+        elif self.task_type == "data_analysis":
+            return self._create_data_analysis()
+        elif self.task_type == "blog_post":
+            return self._create_blog_post()
+        elif self.task_type == "email_content":
+            return self._create_email_content()
+        elif self.task_type == "social_media":
+            return self._create_social_media_content()
+        else:  # Default to research report
             return self._create_research_report()
     
     def _create_marketing_plan(self) -> str:
@@ -212,37 +302,65 @@ class TaskCompleter(BaseModel):
         return deliverable
     
     def _create_research_report(self) -> str:
-        """Create a research report deliverable."""
-        # Simple research report template
+        """Create a comprehensive research report deliverable."""
+        # Enhanced research report template
         template = """
 # Research Report: {topic}
 
-## Overview
-{overview}
+## Executive Summary
+{executive_summary}
 
-## Key Findings
-{key_findings}
+## Background
+{background}
+
+## Methodology
+{methodology}
+
+## Findings
+{findings}
+
+## Analysis
+{analysis}
 
 ## Conclusion
 {conclusion}
+
+## Recommendations
+{recommendations}
+
+## References
+{references}
 """
         
         # Fill in the template with gathered information
-        topic = self._extract_product_name()
+        topic = self.gathered_info.get("topic", self._extract_product_name())
         
         # For each section, use gathered info or generate placeholder
         sections = {
             "topic": topic,
-            "overview": self.gathered_info.get("overview", f"An overview of {topic}."),
-            "key_findings": self.gathered_info.get("key_findings", "Key findings not specified."),
-            "conclusion": self.gathered_info.get("conclusion", f"This research report provides information about {topic}.")
+            "executive_summary": self.gathered_info.get("executive_summary", 
+                                               self.gathered_info.get("overview", f"This report examines {topic} and presents key findings and recommendations.")),
+            "background": self.gathered_info.get("background", 
+                                          f"Background information on {topic} and the context for this research."),
+            "methodology": self.gathered_info.get("methodology", 
+                                           "The methodology used for this research includes literature review, data analysis, and expert interviews."),
+            "findings": self.gathered_info.get("findings", 
+                                        self.gathered_info.get("key_findings", f"Key findings related to {topic}.")),
+            "analysis": self.gathered_info.get("analysis", 
+                                        f"Analysis of the findings and their implications for {topic}."),
+            "conclusion": self.gathered_info.get("conclusion", 
+                                          f"This research provides valuable insights into {topic} and highlights several important considerations."),
+            "recommendations": self.gathered_info.get("recommendations", 
+                                               f"Based on the findings, the following recommendations are proposed for {topic}."),
+            "references": self.gathered_info.get("references", 
+                                          "1. [Include relevant references here]\n2. [Additional references as needed]")
         }
         
         # Fill in the template
         deliverable = template.format(**sections)
         self.deliverable_content = deliverable
         
-        logger.warning(f"📝 Created research report deliverable ({len(deliverable)} chars)")
+        logger.warning(f"📝 Created comprehensive research report deliverable ({len(deliverable)} chars)")
         return deliverable
         
     def _create_poem(self) -> str:

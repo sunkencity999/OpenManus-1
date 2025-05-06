@@ -148,6 +148,12 @@ class BrowserNavigator(BaseModel):
         # Default: no suggestion
         return None
         
+    def _is_homepage(self, url: str) -> bool:
+        """Return True if the URL is a homepage (no path or just '/')."""
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        return parsed.path in ('', '/')
+
     def extract_key_information(self, content: str, keywords: List[str]) -> Dict[str, str]:
         """
         Extract key information from page content based on keywords.

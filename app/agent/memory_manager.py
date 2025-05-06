@@ -30,6 +30,9 @@ class ConversationMemory(BaseModel):
     # Maximum similarity threshold for considering questions as duplicates
     similarity_threshold: float = 0.8
     
+    # Task storage (for compatibility with PersistentMemory)
+    tasks: List[Dict[str, Any]] = Field(default_factory=list)
+    
     def add_question(self, question: str) -> None:
         """Record a question that was asked."""
         self.asked_questions.append(question)
@@ -146,6 +149,61 @@ class ConversationMemory(BaseModel):
     def reset_for_new_task(self) -> None:
         """Reset the conversation memory for a new task."""
         self.reset()
+        
+    # Compatibility methods for PersistentMemory
+    
+    def search_memories_semantic(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Simple implementation of semantic search for compatibility."""
+        # Just return recent context items as a fallback
+        results = []
+        for key, value in self.context.items():
+            results.append({
+                "id": 0,
+                "text": f"{key}: {value}",
+                "source": "context",
+                "timestamp": 0,
+                "score": 1.0
+            })
+            if len(results) >= limit:
+                break
+        return results
+    
+    def store_task(self, task_description: str, completed: bool = False, 
+                  outcome: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> int:
+        """Store a task for compatibility with PersistentMemory."""
+        import time
+        task_id = len(self.tasks) + 1
+        self.tasks.append({
+            "id": task_id,
+            "task_description": task_description,
+            "completed": completed,
+            "timestamp": time.time(),
+            "outcome": outcome or "",
+            "metadata": metadata or {}
+        })
+        return task_id
+    
+    def get_recent_tasks(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get recent tasks for compatibility with PersistentMemory."""
+        return self.tasks[-limit:] if self.tasks else []
+        
+    def store_memory(self, text: str, source: str = "conversation", 
+                    priority: str = "medium", tags: Optional[List[str]] = None, 
+                    metadata: Optional[Dict[str, Any]] = None) -> int:
+        """Store a memory for compatibility with PersistentMemory."""
+        # Just add to context as a simple implementation
+        key = f"memory_{len(self.context) + 1}"
+        self.context[key] = text
+        return 1
+        
+    def update_task(self, task_id: int, completed: bool, outcome: Optional[str] = None) -> None:
+        """Update a task for compatibility with PersistentMemory."""
+        for task in self.tasks:
+            if task.get("id") == task_id:
+                task["completed"] = completed
+                if outcome is not None:
+                    task["outcome"] = outcome
+                break
 
 
 class ToolUsageTracker(BaseModel):

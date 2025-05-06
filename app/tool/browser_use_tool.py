@@ -187,7 +187,28 @@ class BrowserUseTool(BaseTool, Generic[Context]):
 
         return self.context
 
-    async def execute(
+    async def execute(self, *args, **kwargs) -> ToolResult:
+        """
+        Wrapper for browser tool execution. Accepts either (action, ...) or (args_dict), and defaults to go_to_url if only a url is provided.
+        """
+        # Handle dict-style call
+        if args and isinstance(args[0], dict):
+            params = args[0]
+            # If action is missing but url is present, default to go_to_url
+            if 'action' not in params and 'url' in params:
+                params['action'] = 'go_to_url'
+            if 'action' not in params:
+                return ToolResult(error="Missing required parameter: 'action' (or 'url' for navigation)")
+            return await self._execute_internal(**params)
+        # Handle keyword-style call
+        if 'action' not in kwargs:
+            if 'url' in kwargs:
+                kwargs['action'] = 'go_to_url'
+            else:
+                return ToolResult(error="Missing required parameter: 'action' (or 'url' for navigation)")
+        return await self._execute_internal(**kwargs)
+
+    async def _execute_internal(
         self,
         action: str,
         url: Optional[str] = None,

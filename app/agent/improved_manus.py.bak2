@@ -1,14 +1,15 @@
-import random
-import time
-import asyncio
+"""
+Improved Manus agent with enhanced reasoning capabilities.
+"""
+
 import json
-import logging
-import random
+import os
 import re
+import time
 import traceback  # For detailed error logging in python_execute
 from datetime import datetime  # Added for timestamps
 from pathlib import Path  # Added for path manipulation
-from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qs, unquote, urljoin, urlparse  # Added for URL parsing
 
 import requests  # Added for Ollama
@@ -26,7 +27,7 @@ from app.agent.task_analyzer import TaskAnalyzer
 from app.agent.task_completer import TaskCompleter
 from app.agent.toolcall import ToolCallAgent
 from app.agent.url_detector import URLDetector
-from app.config import config  # Import config
+from app.config import config  # Import config singleton
 from app.logger import logger
 from app.prompt.improved_manus import IMPROVED_NEXT_STEP_PROMPT, IMPROVED_SYSTEM_PROMPT
 from app.schema import Message, ToolCall
@@ -135,12 +136,10 @@ class ImprovedManus(ToolCallAgent):
         self.task_completer = TaskCompleter()
         self.task_analyzer = TaskAnalyzer(llm=self.llm)
 
-        # Pass PersistentMemory instance to SmartAskHuman as context_manager
+        # Set the context_manager for SmartAskHuman tool
         smart_ask_tool = self.available_tools.get_tool("ask_human")
         if isinstance(smart_ask_tool, SmartAskHuman):
-            smart_ask_tool.context_manager = (
-                self.conversation_memory
-            )  # SmartAskHuman uses context_manager, not memory
+            smart_ask_tool.context_manager = self  # SmartAskHuman expects a context_manager
 
         return self
 
@@ -159,7 +158,7 @@ class ImprovedManus(ToolCallAgent):
         if self._initialized:  # Avoid re-initialization
             return
 
-        cfg = config  # Use config for configuration settings
+        cfg = config  # Use the config singleton
         if (
             not hasattr(cfg, "mcp_config")
             or not cfg.mcp_config
@@ -503,46 +502,56 @@ class ImprovedManus(ToolCallAgent):
         return observation  # Return formatted observation (success or error)
 
     # List of realistic user agents for rotation
-    REALISTIC_USER_AGENTS: ClassVar[List[str]] = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/112.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/113.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/112.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.42',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.58',
+    REALISTIC_USER_AGENTS = [
+        # Chrome on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+        # Chrome on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+        # Firefox on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/112.0",
+        # Firefox on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/113.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/112.0",
+        # Safari on macOS
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15",
+        # Edge on Windows
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.42",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.58",
     ]
-
+    
     def _get_random_user_agent(self):
         """Return a random user agent from the list of realistic user agents."""
         import random
-
         return random.choice(self.REALISTIC_USER_AGENTS)
-
+    
     async def _apply_stealth_techniques(self, **kwargs):
         """Apply various stealth techniques to avoid bot detection."""
         url = kwargs.get("url", "")
+        browser_tool = self.available_tools.get_tool("browser_use")
+        if not browser_tool:
+            return
+            
+        # Apply stealth techniques using JavaScript
         stealth_script = """
         () => {
             // Override navigator properties to make detection harder
             const newProto = navigator.__proto__;
             delete newProto.webdriver;
-
+            
             // Override permissions
             const originalQuery = window.navigator.permissions.query;
             window.navigator.permissions.query = (parameters) => (
-                parameters.name === "notifications" ?
+                parameters.name === 'notifications' ?
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
             );
-
+            
             // Prevent automation detection
-            Object.defineProperty(navigator, "plugins", {
+            Object.defineProperty(navigator, 'plugins', {
                 get: () => [
                     {
                         0: {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format"},
@@ -567,44 +576,73 @@ class ImprovedManus(ToolCallAgent):
                     }
                 ]
             });
-
-            // Add some randomization to make fingerprinting harder
-            const randomFactor = Math.floor(Math.random() * 10) / 100;
-            Object.defineProperty(window, "devicePixelRatio", {
-                get: function() { return Math.floor((window.screen.width / window.screen.availWidth + randomFactor) * 100) / 100; }
+            
+            // Add language and platform details
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en', 'es', 'fr']
             });
-
-            // Simulate human-like behavior
-            const randomScrollAmount = Math.floor(Math.random() * 100) + 50;
-            setTimeout(() => { window.scrollTo(0, randomScrollAmount); }, Math.random() * 1000 + 500);
-            setTimeout(() => { window.scrollTo(0, 0); }, Math.random() * 1000 + 1500);
-
-            return "Stealth techniques applied";
+            
+            return true;
         }
         """
-
+        
         try:
-            # Apply stealth techniques by using a combination of browser actions
-            # 1. Randomize scrolling to simulate human behavior
-            scroll_amount = random.randint(100, 300)
-            await self.execute_browser_use("scroll_down", scroll_amount=scroll_amount)
-            await asyncio.sleep(0.3)
-            await self.execute_browser_use("scroll_up", scroll_amount=scroll_amount // 2)
-
-            # 2. Add a slight delay to simulate human reading
-            await asyncio.sleep(0.5)
-            logger.info(
-                f"Applied stealth techniques for {url if url else 'current page'}"
-            )
+            # Execute the stealth script
+            await browser_tool.execute("evaluate", script=stealth_script)
+            
+            # Add random delays to simulate human behavior
+            if url and ("google.com" in url or "duckduckgo.com" in url):
+                import time
+                import random
+                
+                # Random delay between 1-3 seconds
+                delay = random.uniform(1, 3)
+                time.sleep(delay)
+                
+                # For search engines, add additional human-like behavior
+                human_behavior_script = """
+                () => {
+                    // Simulate mouse movements
+                    function simulateMouseMovement() {
+                        const events = ['mouseover', 'mousedown', 'mouseup', 'click'];
+                        const elements = document.querySelectorAll('a, button, input');
+                        if (elements.length > 0) {
+                            const randomElement = elements[Math.floor(Math.random() * elements.length)];
+                            events.forEach(event => {
+                                randomElement.dispatchEvent(new MouseEvent(event, {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window
+                                }));
+                            });
+                        }
+                        return true;
+                    }
+                    
+                    // Simulate scrolling
+                    function simulateScrolling() {
+                        const scrollAmount = Math.floor(Math.random() * 500) + 100;
+                        window.scrollBy(0, scrollAmount);
+                        setTimeout(() => {
+                            window.scrollBy(0, Math.floor(Math.random() * 200) + 100);
+                        }, Math.random() * 1000 + 500);
+                        return true;
+                    }
+                    
+                    simulateMouseMovement();
+                    return simulateScrolling();
+                }
+                """
+                await browser_tool.execute("evaluate", script=human_behavior_script)
+                
+                # Add another small random delay
+                time.sleep(random.uniform(0.5, 1.5))
+                
         except Exception as e:
-            logger.warning(f"Error applying stealth techniques: {str(e)}")
-
+            logger.warning(f"Failed to apply stealth techniques: {str(e)}")
+    
     async def execute_browser_use(self, action_or_url: str, **kwargs):
         """Execute browser use tool with enhanced navigation, overlay handling, and context storage."""
-        # Apply user agent rotation
-        random_user_agent = self._get_random_user_agent()
-        kwargs["headers"] = kwargs.get("headers", {})
-        kwargs["headers"]["User-Agent"] = random_user_agent
         action = action_or_url
         url = kwargs.get("url", "")
         final_content = ""  # Initialize content string
@@ -627,9 +665,24 @@ class ImprovedManus(ToolCallAgent):
                 raise ValueError(
                     f"Invalid browser_use call: action='{action}' needs url, selector, script, or key."
                 )
+                
+            # Set a random user agent for search engine requests
+            if url and ("google.com" in url or "duckduckgo.com" in url or "bing.com" in url):
+                # Apply user agent rotation and stealth techniques
+                random_user_agent = self._get_random_user_agent()
+                if "headers" not in kwargs:
+                    kwargs["headers"] = {}
+                kwargs["headers"]["User-Agent"] = random_user_agent
+                
+                # Log the user agent being used
+                logger.info(f"Using User-Agent: {random_user_agent}")
+                
+                # Apply stealth techniques before navigation
+                if action == "go_to_url":
+                    await self._apply_stealth_techniques(**kwargs)
 
             logger.info(
-                f"Executing browser action: '{action}' | URL: '{url}' | Other args: { {k:v for k,v in kwargs.items() if k != 'url'} }"
+                f"Executing browser action: '{action}' | URL: '{url}' | Other args: { {k:v for k,v in kwargs.items() if k != 'url' and k != 'headers'} }"
             )
 
             browser_tool = self.available_tools.get_tool("browser_use")
@@ -647,11 +700,8 @@ class ImprovedManus(ToolCallAgent):
             if action == "go_to_url" and url:
                 self.visited_urls.add(url)
                 logger.info(
-                    f"Navigation to {url} successful (initial). Applying stealth techniques and handling overlays..."
+                    f"Navigation to {url} successful (initial). Handling overlays and extracting content..."
                 )
-
-                # Apply stealth techniques to avoid bot detection
-                await self._apply_stealth_techniques(url=url)
 
                 # Handle Overlays AFTER Navigation attempt
                 await self._handle_website_overlays()
@@ -660,9 +710,8 @@ class ImprovedManus(ToolCallAgent):
                 extracted_content = ""
                 try:
                     # Scroll first to trigger lazy loading
-                    await browser_tool.execute("scroll_down", scroll_amount=500)
-                    await asyncio.sleep(0.5)
-                    await browser_tool.execute("scroll_up", scroll_amount=500)
+                    scroll_script = "window.scrollTo(0, document.body.scrollHeight / 4); setTimeout(() => window.scrollTo(0, 0), 250);"
+                    await browser_tool.execute("evaluate", script=scroll_script)
                     time.sleep(0.5)
 
                     # Try extracting main content via JS (more lightweight)
@@ -678,7 +727,7 @@ class ImprovedManus(ToolCallAgent):
                      extractMainText();
                      """
                     js_content = await browser_tool.execute(
-                        "extract_content", goal="Extract main textual content from the page"
+                        "evaluate", script=js_extract_script
                     )
                     if js_content and len(str(js_content)) > 100:
                         extracted_content = str(js_content).strip()
@@ -690,7 +739,7 @@ class ImprovedManus(ToolCallAgent):
                             "JS text extraction failed or too short, getting full HTML."
                         )
                         html = await browser_tool.execute(
-                            "extract_content", goal="Get the full HTML of the page"
+                            "evaluate", script="document.documentElement.outerHTML"
                         )
                         if html and not str(html).startswith("Error:"):
                             extracted_content = self._extract_main_content(str(html))
@@ -779,157 +828,210 @@ class ImprovedManus(ToolCallAgent):
             )
             return f"Error: Browser action `{action}` failed: {str(e)}"
 
-    async def perform_web_research(
-        self, query: str, max_sites: int = 4
-    ) -> str:  # Reduced max_sites further
+    async def perform_web_research(self, query: str, max_sites: int = 10) -> str:
         """Perform web research: Search (DDG HTML) -> Extract URLs -> Visit -> Extract Content -> Analyze."""
         urls_to_visit = []
         search_engine_url = ""
         logger.info(f"🔬 Starting web research for query: '{query}'")
+        search_page_html = None  # Initialize
 
         # --- Step 1: Search using DuckDuckGo HTML ---
         try:
             search_query_encoded = requests.utils.quote(query)
-            search_engine_url = (
-                f"https://html.duckduckgo.com/html/?q={search_query_encoded}"
-            )
+            search_engine_url = f"https://html.duckduckgo.com/html/?q={search_query_encoded}"
             logger.info(f"Searching DuckDuckGo HTML: {search_engine_url}")
+        except Exception as e:
+            logger.error(f"Error encoding search query: {str(e)}")
+            return f"Error: Failed to encode search query. {str(e)}"
+            
+        try:
 
-            # Use execute_browser_use to navigate and get initial HTML (it handles overlays)
-            # We need the HTML content here, not just confirmation
-            await self.execute_browser_use("go_to_url", url=search_engine_url)
+            # --- Use execute_browser_use wrapper ---
+            # Navigate first
+            navigation_observation = await self.execute_browser_use('go_to_url', url=search_engine_url)
+
+            # Check if navigation itself failed
+            if isinstance(navigation_observation, str) and navigation_observation.startswith("Error:"):
+                logger.error(f"Initial navigation failed: {navigation_observation}")
+                # Attempt Google fallback maybe? Or just return error.
+                # For now, return error:
+                return f"Error: Could not navigate to search engine. {navigation_observation}"
+
             # Handle potential overlays on the search results page itself
             await self._handle_website_overlays()
-            # Get the page content directly from the browser tool
-            browser_tool = self.available_tools.get_tool("browser_use")
-            if not browser_tool:
-                logger.error("BrowserUseTool not found.")
-                return "Error: Browser tool not available."
 
-            # Get the current page content
-            try:
-                # First try to get the page state which includes the HTML
-                state_result = await browser_tool.get_current_state()
+            # Now get the HTML using the wrapper *after* overlays handled
+            logger.info("Attempting to retrieve HTML content after overlay handling...")
+            html_observation = await self.execute_browser_use('evaluate', script="document.documentElement.outerHTML")
 
-                # Save the state output to a debug file
-                try:
-                    debug_dir = Path("debug_output")
-                    debug_dir.mkdir(exist_ok=True)
-                    with open(debug_dir / "browser_state.txt", "w", encoding="utf-8") as f:
-                        f.write(str(state_result.output) if state_result and state_result.output else "No output")
-                    logger.info("Saved browser state to debug_output/browser_state.txt")
-                except Exception as e:
-                    logger.error(f"Failed to save debug state: {e}")
-
-                if state_result and not state_result.error:
-                    # Extract URLs directly from the state output using regex
-                    state_text = str(state_result.output)
-                    # First, try to extract URLs from the interactive_elements section
-                    # This section contains links with their text and URLs
-                    interactive_elements = ""
-                    if "interactive_elements" in state_text:
-                        # Extract the interactive_elements section
-                        match = re.search(r'"interactive_elements":\s*"(.+?)"', state_text, re.DOTALL)
-                        if match:
-                            interactive_elements = match.group(1).replace('\\n', '\n')
-                    
-                    # Extract URLs from the interactive elements section
-                    extracted_urls = []
-                    if interactive_elements:
-                        # Look for URLs in the interactive elements section
-                        # Pattern for URLs like www.example.com/path/ or https://example.com/path/
-                        url_patterns = [
-                            r'\[\d+\]<a\s+([\w.-]+\.[\w]{2,}/[^\s>]+)/>', # Domain with path
-                            r'\[\d+\]<a\s+([\w.-]+\.[\w]{2,})/>', # Just domain
-                            r'\[\d+\]<a\s+https?://([^\s>]+)/>', # Full URL
-                            r'https?://([\w.-]+\.[\w]{2,}/[^\s>"]+)', # URLs in text
-                            r'([\w.-]+\.[\w]{2,}/[^\s>"]+)' # Domain with path in text
-                        ]
-                        
-                        for pattern in url_patterns:
-                            for match in re.finditer(pattern, interactive_elements):
-                                url = match.group(1).strip()
-                                if not url.startswith('http'):
-                                    url = f"https://{url}"
-                                extracted_urls.append(url)
-                        
-                        # Also look for URLs in the numbered links [X]<a url>
-                        numbered_links = re.finditer(r'\[(\d+)\]<a\s+([^/]+)/>', interactive_elements)
-                        for match in numbered_links:
-                            index = match.group(1)
-                            link_text = match.group(2).strip()
-                            
-                            # Look for the corresponding URL that might appear after this link
-                            # Often in format [X]<a www.example.com/>
-                            if re.match(r'^[\w.-]+\.[\w]{2,}', link_text):
-                                if not link_text.startswith('http'):
-                                    extracted_urls.append(f"https://{link_text}")
-                                else:
-                                    extracted_urls.append(link_text)
-                    
-                    # If we didn't find URLs in the interactive elements, try general regex
-                    if not extracted_urls:
-                        all_urls = self._extract_urls(state_text)
-                        extracted_urls = all_urls
-                    
-                    # Filter out DuckDuckGo internal URLs and image/document files
-                    urls_to_visit = [
-                        url for url in extracted_urls
-                        if "duckduckgo.com" not in url
-                        and not url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf"))
-                    ]
-                    
-                    logger.info(f"Extracted {len(urls_to_visit)} URLs directly from browser state.")
-                    search_page_html = state_text  # Keep the state text for fallback parsing
+            # --- Extract actual HTML from the observation ---
+            if isinstance(html_observation, str):
+                if html_observation.startswith("Observed output"):
+                    search_page_html = html_observation.split("executed:\n", 1)[-1]
+                    logger.info(f"Successfully retrieved search page HTML (length: {len(search_page_html)}).")
+                elif html_observation.startswith("Error:"):
+                    # THIS is where the error message from the log likely ended up
+                    logger.error(f"Failed to retrieve HTML content via evaluate: {html_observation}")
+                    search_page_html = None  # Explicitly mark as failed
                 else:
-                    logger.warning(f"Failed to get page state: {state_result.error if state_result else 'No result'}")
-                    search_page_html = ""  # Empty string will trigger fallback
-                    urls_to_visit = []
-            except Exception as e:
-                logger.error(f"Error getting page content: {e}")
-                search_page_html = ""  # Empty string will trigger fallback
+                    # Handle unexpected observation format
+                    logger.warning(f"Unexpected observation format when getting HTML: {html_observation[:200]}...")
+                    search_page_html = html_observation  # Try to use it anyway
+            else:
+                # If it's not a string, it might be the raw HTML or some other object
+                search_page_html = str(html_observation)
+                logger.info(f"Retrieved non-string HTML content (type: {type(html_observation)}, length: {len(search_page_html)})")
+            # --- End using wrapper ---
 
-            # If we don't have URLs from the direct extraction, try fallback methods
-            if not urls_to_visit:
-                if (not search_page_html or str(search_page_html).startswith("Error:") or len(str(search_page_html)) < 1500):
-                    logger.error(f"Failed to retrieve valid HTML from DDG search: {str(search_page_html)[:200]}")
-                    # Try Google as a fallback
-                    logger.info("Trying Google as a fallback search engine")
-                    try:
-                        google_search_url = f"https://www.google.com/search?q={search_query_encoded}"
-                        logger.info(f"Searching Google: {google_search_url}")
-
-                        # Navigate to Google search with our user agent and stealth techniques
-                        await self.execute_browser_use('go_to_url', url=google_search_url)
-
-                        # Apply stealth techniques
-                        await self._apply_stealth_techniques(url=google_search_url)
-
-                        # Handle potential overlays
-                        await self._handle_website_overlays()
-
-                        # Wait a bit for dynamic content to load
-                        time.sleep(2)
-
-                        # Get the page state which should include links
-                        google_state = await browser_tool.get_current_state()
-                        if google_state and not google_state.error:
-                            # Extract URLs directly from the state output using regex
-                            google_state_text = str(google_state.output)
-                            all_urls = self._extract_urls(google_state_text)
-                            # Filter out Google internal URLs and document files
-                            google_urls = [
-                                url for url in all_urls
-                                if not any(x in url.lower() for x in ['google.com/search', 'google.com/imgres', 'accounts.google', '/amp/', 'webcache.googleusercontent', 'translate.google'])
-                                and not url.lower().endswith(('.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'))
-                            ]
-                            logger.info(f"Extracted {len(google_urls)} URLs from Google state")
+            # --- Check the retrieved HTML ---
+            # Now the check makes more sense: check if search_page_html is None or too short
+            if search_page_html is None or len(search_page_html) < 1500:
+                # The log message below should now reflect the actual failure reason from html_observation if it was an error
+                log_reason = html_observation if html_observation and isinstance(html_observation, str) and html_observation.startswith("Error:") else f"HTML too short ({len(str(search_page_html) if search_page_html else 'None')}) chars or None."
+                logger.warning(f"Failed to retrieve valid HTML from DDG search: {log_reason}")
+                
+                # Try Google as a fallback
+                logger.info("Trying Google as a fallback search engine")
+                try:
+                    google_search_url = f"https://www.google.com/search?q={search_query_encoded}"
+                    logger.info(f"Searching Google: {google_search_url}")
+                    
+                    # Navigate to Google search
+                    await self.execute_browser_use("go_to_url", url=google_search_url)
+                    
+                    # Handle potential overlays
+                    await self._handle_website_overlays()
+                    
+                    # Wait a bit for dynamic content to load
+                    import time
+                    time.sleep(2)
+                    
+                    # Extract URLs using our specialized JavaScript function
+                    js_extract_script = """
+                    function extractSearchResults() {
+                        const results = [];
+                        const seenUrls = new Set();
+                        
+                        // Try various selectors for Google search results
+                        const searchSelectors = [
+                            '.g .yuRUbf > a',                  // Modern Google search result links
+                            '.g div > a[href^="http"]',       // Alternative structure
+                            '.rc .r > a',                       // Older Google structure
+                            '[data-header-feature] a',          // Featured snippets
+                            '.g a[ping]',                       // Links with ping attribute
+                            'div[data-hveid] a[href^="http"]', // General result containers
+                            'div[data-sokoban-feature] a[href^="http"]', // Another container type
+                            'a[jsname]',                        // Google's jsname links
+                            'a[data-ved]'                       // Links with data-ved attribute
+                        ];
+                        
+                        // Try each selector
+                        for (const selector of searchSelectors) {
+                            try {
+                                const links = document.querySelectorAll(selector);
+                                if (links.length > 0) {
+                                    console.log(`Found ${links.length} links with selector: ${selector}`);
+                                }
+                                
+                                for (const link of links) {
+                                    try {
+                                        const url = link.href;
+                                        
+                                        // Skip if we've already seen this URL or if it's a Google internal URL
+                                        if (seenUrls.has(url) || 
+                                            url.includes('google.com/search') || 
+                                            url.includes('google.com/imgres') || 
+                                            url.includes('accounts.google') ||
+                                            url.includes('/amp/') ||
+                                            url.includes('webcache.googleusercontent') ||
+                                            url.includes('google.com/url?') ||
+                                            url.endsWith('.jpg') || 
+                                            url.endsWith('.jpeg') || 
+                                            url.endsWith('.png') || 
+                                            url.endsWith('.gif') || 
+                                            url.endsWith('.css') || 
+                                            url.endsWith('.js')) {
+                                            continue;
+                                        }
+                                        
+                                        // Add to results and mark as seen
+                                        results.push({
+                                            url: url,
+                                            title: link.textContent.trim() || 'Untitled'
+                                        });
+                                        seenUrls.add(url);
+                                    } catch (linkError) {
+                                        console.log('Error processing link:', linkError);
+                                    }
+                                }
+                            } catch (selectorError) {
+                                console.log('Error with selector:', selector, selectorError);
+                            }
+                        }
+                        
+                        // If we still don't have results, try a more aggressive approach
+                        if (results.length === 0) {
+                            console.log('No results found with standard selectors, trying aggressive approach');
+                            // Get all links on the page
+                            try {
+                                const allLinks = document.querySelectorAll('a[href^="http"]');
+                                
+                                for (const link of allLinks) {
+                                    try {
+                                        const url = link.href;
+                                        
+                                        // Skip if we've already seen this URL or if it's a Google internal URL
+                                        if (seenUrls.has(url) || 
+                                            url.includes('google.com/search') || 
+                                            url.includes('google.com/imgres') || 
+                                            url.includes('accounts.google') ||
+                                            url.includes('/amp/') ||
+                                            url.includes('webcache.googleusercontent') ||
+                                            url.includes('google.com/url?') ||
+                                            url.endsWith('.jpg') || 
+                                            url.endsWith('.jpeg') || 
+                                            url.endsWith('.png') || 
+                                            url.endsWith('.gif') || 
+                                            url.endsWith('.css') || 
+                                            url.endsWith('.js')) {
+                                            continue;
+                                        }
+                                        
+                                        results.push({
+                                            url: url,
+                                            title: link.textContent.trim() || 'Untitled'
+                                        });
+                                        seenUrls.add(url);
+                                    } catch (linkError) {
+                                        console.log('Error processing link in aggressive approach:', linkError);
+                                    }
+                                }
+                            } catch (allLinksError) {
+                                console.log('Error getting all links:', allLinksError);
+                            }
+                        }
+                        
+                        console.log(`Total unique URLs found: ${results.length}`);
+                        return results;
+                    }
+                    return extractSearchResults();
+                    """
+                    
+                    search_results = await self.execute_browser_use("evaluate", script=js_extract_search_results)
+                    
+                    if search_results and isinstance(search_results, list) and len(search_results) > 0:
+                        # Extract just the URLs from the results
+                        google_urls = [result['url'] for result in search_results if 'url' in result]
+                        logger.info(f"Extracted {len(google_urls)} URLs from Google search")
+                        
+                        if google_urls:
                             urls_to_visit = google_urls[:max_sites]
+                            logger.info("Successfully extracted URLs from Google fallback")
                         else:
-                            # Try Bing as a last resort
-                            logger.info("Google fallback failed, trying Bing as a last resort")
+                            # If we couldn't extract URLs from Google either, try Bing as a last resort
+                            logger.warning("Could not extract URLs from Google search, trying Bing as a last resort")
                             bing_urls = await self._fallback_bing_search(query)
-
+                            
                             if bing_urls:
                                 urls_to_visit = bing_urls[:max_sites]
                                 logger.info(f"Successfully extracted {len(urls_to_visit)} URLs from Bing fallback search")
@@ -937,26 +1039,80 @@ class ImprovedManus(ToolCallAgent):
                                 # If all search engines fail, return an error
                                 logger.error("All search engines failed to provide usable URLs")
                                 return "Error: Could not extract any URLs from multiple search engines. Please try a different query or try again later."
-                    except Exception as e:
-                        logger.error(f"Error during fallback search: {str(e)}")
-                        return f"Error: Failed to retrieve search results from both DuckDuckGo and Google. {str(e)}"
-                else:
-                    logger.info(f"Successfully retrieved DDG HTML results page (length: {len(str(search_page_html))}).")
-                    # Try the traditional HTML parsing as a fallback
-                    parsed_urls = self._extract_ddg_search_results(str(search_page_html))
-                    if parsed_urls:
-                        urls_to_visit = parsed_urls
-                        logger.info(f"Extracted {len(urls_to_visit)} URLs from DDG HTML parsing.")
                     else:
-                        # If still no URLs, try a more aggressive approach with regex
-                        logger.info("No URLs from HTML parsing, trying aggressive regex approach")
-                        all_urls = self._extract_urls(str(search_page_html))
-                        urls_to_visit = [
-                            url for url in all_urls
-                            if "duckduckgo.com" not in url
-                            and not url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf"))
-                        ]
-                        logger.info(f"Extracted {len(urls_to_visit)} URLs from aggressive regex approach.")
+                        # If Google fails too, try Bing as a last resort
+                        logger.warning("Failed to extract URLs from Google search, trying Bing as a last resort")
+                        bing_urls = await self._fallback_bing_search(query)
+                        
+                        if bing_urls:
+                            urls_to_visit = bing_urls[:max_sites]
+                            logger.info(f"Successfully extracted {len(urls_to_visit)} URLs from Bing fallback search")
+                        else:
+                            # If all search engines fail, return an error
+                            logger.error("All search engines failed to provide usable URLs")
+                            return "Error: Could not extract any URLs from multiple search engines. Please try a different query or try again later."
+                except Exception as e:
+                    logger.error(f"Error during Google fallback search: {str(e)}")
+                    # Try Bing as a last resort
+                    logger.info("Google fallback failed, trying Bing as a last resort")
+                    try:
+                        bing_urls = await self._fallback_bing_search(query)
+                        
+                        if bing_urls:
+                            urls_to_visit = bing_urls[:max_sites]
+                            logger.info(f"Successfully extracted {len(urls_to_visit)} URLs from Bing fallback search")
+                        else:
+                            # If all search engines fail, return an error
+                            logger.error("All search engines failed to provide usable URLs")
+                            return "Error: Could not extract any URLs from multiple search engines. Please try a different query or try again later."
+                    except Exception as bing_error:
+                        logger.error(f"Error during Bing fallback search: {str(bing_error)}")
+                        return f"Error: All search engines failed. {str(e)} and {str(bing_error)}"
+                    
+                    # End of exception handling block
+                    
+                    # Extract URLs using our specialized JavaScript function
+                    js_extract_search_results = """
+                    function extractSearchResults() {
+                        const results = [];
+                        const seenUrls = new Set();
+                        
+                        // Try various selectors for Google search results
+                        const searchSelectors = [
+                            '.g .yuRUbf > a',                  // Modern Google search result links
+                            '.g div > a[href^="http"]',       // Alternative structure
+                            '.rc .r > a',                       // Older Google structure
+                            '[data-header-feature] a',          // Featured snippets
+                            '.g a[ping]',                       // Links with ping attribute
+                            'div[data-hveid] a[href^="http"]', // General result containers
+                            'div[data-sokoban-feature] a[href^="http"]', // Another container type
+                            'a[jsname]',                        // Google's jsname links
+                            'a[data-ved]'                       // Links with data-ved attribute
+                        ];
+                        
+                        // Try each selector
+                        for (const selector of searchSelectors) {
+                            try {
+                                const links = document.querySelectorAll(selector);
+                                if (links.length > 0) {
+                                    console.log(`Found ${links.length} links with selector: ${selector}`);
+                                }
+                                
+                                for (const link of links) {
+                                    try {
+                                        const url = link.href;
+                                        
+                                        // Skip if we've already seen this URL or if it's a Google internal URL
+                                        if (seenUrls.has(url) || 
+                                            url.includes('google.com/search') || 
+                                            url.includes('google.com/imgres') || 
+                                            url.includes('accounts.google') ||
+                                            url.includes('/amp/') ||
+                                            url.includes('webcache.googleusercontent') ||
+            else:
+                logger.info(f"Successfully retrieved search page HTML (length: {len(str(search_page_html))}).")
+                logger.info("Attempting to extract URLs from DuckDuckGo HTML results...")
+                urls_to_visit = self._extract_ddg_search_results(str(search_page_html))
 
             if urls_to_visit:
                 logger.info(f"Extracted {len(urls_to_visit)} potential URLs from DDG.")
@@ -965,14 +1121,11 @@ class ImprovedManus(ToolCallAgent):
                     for u in urls_to_visit
                     if not u.lower().endswith((".pdf", ".xml", ".zip"))
                 ][:max_sites]
-                logger.info(
-                    f"Selected {len(urls_to_visit)} URLs to visit: {urls_to_visit}"
-                )
+                logger.info(f"Selected {len(urls_to_visit)} URLs to visit: {urls_to_visit}")
             else:
-                logger.warning(
-                    f"No valid URLs extracted from DDG results for: '{query}'"
-                )
-                return f"Web research for '{query}' did not yield any result URLs to visit."
+                logger.warning(f"No valid URLs extracted from DDG results for: '{query}'")
+                # Return more informative message
+                return f"Web research for '{query}' returned search results, but no valid URLs could be extracted from them."
 
         except Exception as e:
             logger.error(
@@ -985,11 +1138,13 @@ class ImprovedManus(ToolCallAgent):
         processed_content = []  # Store {'url': url, 'content': text}
         visited_count = 0
         if not urls_to_visit:
+            # This case should be handled above, but added for safety
             return "No search result URLs found to visit."
 
         for i, url in enumerate(urls_to_visit):
             if visited_count >= max_sites:
                 break
+
             logger.info(f"Visiting URL {i+1}/{len(urls_to_visit)}: {url}")
             try:
                 # execute_browser_use handles navigation, overlays, extraction
@@ -997,29 +1152,36 @@ class ImprovedManus(ToolCallAgent):
                 observation = await self.execute_browser_use("go_to_url", url=url)
 
                 # Extract content from the observation string if successful
-                if observation.startswith(
-                    "Observed output"
-                ) and not observation.startswith("Error:"):
-                    # Extract content after the preamble
-                    content_part = observation.split("executed:\n", 1)[-1]
-                    if (
-                        content_part
-                        and not content_part.startswith("Visited")
-                        or "extract significant content" not in content_part
-                    ):
-                        logger.info(
-                            f"Successfully retrieved content for {url}, length: {len(content_part)}"
-                        )
-                        processed_content.append({"url": url, "content": content_part})
+                if isinstance(observation, str):
+                    if observation.startswith("Observed output"):
+                        # Extract content after the preamble
+                        content_part = observation.split("executed:\n", 1)[-1]
+                        # Check if content seems valid (not an error message disguised as content)
+                        if content_part and len(content_part) > 50 and not (content_part.startswith("Visited") or "extract significant content" in content_part):
+                            logger.info(f"Successfully retrieved content for {url}, length: {len(content_part)}")
+                            processed_content.append({"url": url, "content": content_part})
+                            visited_count += 1
+                        else:
+                            logger.warning(f"Skipping URL {url} due to apparently missing/failed content extraction: {content_part[:100]}...")
+                    elif observation.startswith("Error:"):
+                        logger.warning(f"Skipping URL {url} due to error during visit/extraction: {observation[:200]}")
+                    else:
+                        # Try to use the observation as content anyway
+                        if len(observation) > 100:
+                            logger.info(f"Using unexpected observation format as content for {url}, length: {len(observation)}")
+                            processed_content.append({"url": url, "content": observation})
+                            visited_count += 1
+                        else:
+                            logger.warning(f"Skipping URL {url} due to short/invalid content: {observation[:100]}")
+                else:
+                    # If it's not a string but some other object, try to use it as content
+                    content_str = str(observation)
+                    if len(content_str) > 100:
+                        logger.info(f"Using non-string observation as content for {url}, length: {len(content_str)}")
+                        processed_content.append({"url": url, "content": content_str})
                         visited_count += 1
                     else:
-                        logger.warning(
-                            f"Skipping URL {url} due to extraction failure indicated in observation: {content_part[:100]}..."
-                        )
-                else:
-                    logger.warning(
-                        f"Skipping URL {url} due to error in observation: {observation[:200]}"
-                    )
+                        logger.warning(f"Skipping URL {url} due to invalid non-string content type: {type(observation)}")
 
                 if i < len(urls_to_visit) - 1:
                     time.sleep(1.5)  # Delay
@@ -1028,9 +1190,7 @@ class ImprovedManus(ToolCallAgent):
                 logger.error(f"Critical error processing URL {url}: {e}", exc_info=True)
 
         # --- Step 3: Analyze Collected Content ---
-        logger.info(
-            f"Finished visiting URLs. Collected content from {visited_count} sites."
-        )
+        logger.info(f"Finished visiting URLs. Collected content from {visited_count} sites.")
 
         if not processed_content:
             logger.warning(f"No content collected for query: '{query}'")
@@ -1039,14 +1199,10 @@ class ImprovedManus(ToolCallAgent):
         combined_content_for_analysis = ""
         sources_metadata = []
         for idx, item in enumerate(processed_content):
-            combined_content_for_analysis += (
-                f"\n\n--- SOURCE {idx+1}: {item['url']} ---\n\n{item['content']}"
-            )
+            combined_content_for_analysis += f"\n\n--- SOURCE {idx+1}: {item['url']} ---\n\n{item['content']}"
             sources_metadata.append({"id": idx + 1, "url": item["url"]})
 
-        logger.info(
-            f"Combined content length for analysis: {len(combined_content_for_analysis)}"
-        )
+        logger.info(f"Combined content length for analysis: {len(combined_content_for_analysis)}")
 
         analysis_result = await self._analyze_combined_content(
             combined_content_for_analysis, query, sources_metadata
@@ -1054,51 +1210,85 @@ class ImprovedManus(ToolCallAgent):
         return f"Web research result for query '{query}':\n{analysis_result}"  # Add context
 
     async def _fallback_bing_search(self, query: str) -> List[str]:
-        '''Use Bing as a fallback search engine when other methods fail.'''
+        """Use Bing as a fallback search engine when other methods fail."""
         try:
             logger.info(f"Using Bing fallback search for query: '{query}'")
             search_query_encoded = requests.utils.quote(query)
             bing_url = f"https://www.bing.com/search?q={search_query_encoded}"
             
-            # Navigate to Bing with our stealth techniques (user agent rotation is handled by execute_browser_use)
-            await self.execute_browser_use('go_to_url', url=bing_url)
+            # Use a different user agent for Bing
+            random_user_agent = self._get_random_user_agent()
             
-            # Apply stealth techniques
-            await self._apply_stealth_techniques(url=bing_url)
-            
-            # Handle potential overlays
-            await self._handle_website_overlays()
+            # Navigate to Bing with our stealth techniques
+            await self.execute_browser_use("go_to_url", url=bing_url)
             
             # Add a delay to let the page load
+            import time
             time.sleep(2)
             
-            # Get the browser state which should include the page content
-            browser_tool = self.available_tools.get_tool("browser_use")
-            if not browser_tool:
-                logger.error("BrowserUseTool not found.")
+            # Extract URLs using a simpler script for Bing to avoid syntax issues
+            bing_extract_script = '''
+            function extractBingResults() {
+                const results = [];
+                const seenUrls = new Set();
+                
+                // Get all links on the page
+                const allLinks = document.querySelectorAll('a[href^="http"]');
+                
+                for (const link of allLinks) {
+                    try {
+                        const url = link.href;
+                        if (!url) continue;
+                        
+                        // Skip if already seen or if it's a Bing URL
+                        if (seenUrls.has(url) || 
+                            url.includes("bing.com") || 
+                            url.includes("microsoft.com") || 
+                            url.includes("msn.com") || 
+                            url.endsWith(".jpg") || 
+                            url.endsWith(".jpeg") || 
+                            url.endsWith(".png") || 
+                            url.endsWith(".gif") || 
+                            url.endsWith(".pdf") || 
+                            url.endsWith(".css") || 
+                            url.endsWith(".js")) {
+                            continue;
+                        }
+                        
+                        // Get the title
+                        const title = link.textContent.trim() || "Untitled";
+                        
+                        results.push({
+                            url: url,
+                            title: title
+                        });
+                        seenUrls.add(url);
+                    } catch (e) {
+                        console.log("Error processing link:", e);
+                    }
+                }
+                
+                console.log("Extracted " + results.length + " URLs from Bing");
+                return results;
+            }
+            return extractBingResults();
+            '''
+            
+            search_results = await self.execute_browser_use("evaluate", script=bing_extract_script)
+            
+            if search_results and isinstance(search_results, list) and len(search_results) > 0:
+                # Extract just the URLs from the results
+                bing_urls = [result['url'] for result in search_results if 'url' in result]
+                logger.info(f"Successfully extracted {len(bing_urls)} URLs from Bing fallback search")
+                return bing_urls
+            else:
+                logger.warning("Failed to extract URLs from Bing fallback search")
                 return []
                 
-            # Get the current page state
-            state_result = await browser_tool.get_current_state()
-            if state_result and not state_result.error:
-                # Extract URLs directly from the state output using regex
-                state_text = str(state_result.output)
-                all_urls = self._extract_urls(state_text)
-                # Filter out Bing internal URLs and document files
-                urls = [
-                    url for url in all_urls
-                    if not any(x in url.lower() for x in ['bing.com/search', 'bing.com/images', 'microsoft.com', 'msn.com'])
-                    and not url.lower().endswith(('.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'))
-                ]
-                logger.info(f"Extracted {len(urls)} URLs from Bing state")
-                return urls
-            else:
-                logger.warning("Failed to get Bing page state")
-                return []
         except Exception as e:
-            logger.error(f"Error during Bing fallback search: {e}")
+            logger.error(f"Error during Bing fallback search: {str(e)}")
             return []
-
+    
     def _extract_google_search_results(self, html: str) -> List[str]:
         """Extracts organic search result URLs from Google HTML content."""
         urls = set()
@@ -1145,65 +1335,28 @@ class ImprovedManus(ToolCallAgent):
         urls = set()
         try:
             soup = BeautifulSoup(html, "html.parser")
-
-            # Try multiple selector approaches to be more robust
-            selectors = [
-                "div.result a.result__a",  # Traditional DDG HTML results
-                "div.result a[href]",      # Any links in result divs
-                "div.links_main a[href]",  # Alternative structure
-                "h2 a[href]",              # Headers with links
-                "a.result__url",           # URL class
-                "a[data-testid='result-title-a']",  # Newer test IDs
-                "a[href^='/l/?']",        # DDG redirect links
-                "a[href^='https://']",     # Direct https links
-                "a[href^='http://']",      # Direct http links
-            ]
-
-            # Try each selector approach
-            for selector in selectors:
-                for link_tag in soup.select(selector):
-                    if link_tag and link_tag.has_attr("href"):
-                        href = link_tag["href"]
-                        try:
-                            # Handle DDG redirect links
-                            if href.startswith("/l/?"):
-                                parsed_href = urlparse(href)
-                                query_params = parse_qs(parsed_href.query)
-                                if "uddg" in query_params:
-                                    actual_url = query_params["uddg"][0]
-                                    if actual_url.startswith("http"):
-                                        urls.add(unquote(actual_url))
-                                elif "ud" in query_params:
-                                    actual_url = query_params["ud"][0]
-                                    if actual_url.startswith("http"):
-                                        urls.add(unquote(actual_url))
-                            # Handle direct links
-                            elif href.startswith("http"):
-                                # Skip DuckDuckGo internal links
-                                if "duckduckgo.com" not in urlparse(href).netloc:
-                                    urls.add(unquote(href))
-                        except Exception as e:
-                            logger.debug(f"Error parsing DDG link {href}: {e}")
-
-            # If we still don't have any URLs, try a more aggressive approach
-            if not urls:
-                logger.info("No URLs found with standard selectors, trying aggressive approach")
-                # Get all links and filter out non-http and DuckDuckGo internal links
-                for link in soup.find_all('a', href=True):
-                    href = link['href']
+            # Main results are in divs with class="result" containing h2 with class="result__title" and a with class="result__a"
+            for result_div in soup.select("div.result"):
+                link_tag = result_div.select_one("a.result__a")
+                if link_tag and link_tag.has_attr("href"):
+                    href = link_tag["href"]
                     try:
-                        if href.startswith('http') and 'duckduckgo.com' not in href:
-                            urls.add(unquote(href))
-                        elif href.startswith('/l/?'):
+                        if href.startswith("/l/?kh="):  # DDG redirect
                             parsed_href = urlparse(href)
                             query_params = parse_qs(parsed_href.query)
-                            for param in ['uddg', 'ud']:
-                                if param in query_params:
-                                    actual_url = query_params[param][0]
-                                    if actual_url.startswith("http"):
-                                        urls.add(unquote(actual_url))
+                            if "uddg" in query_params:
+                                actual_url = query_params["uddg"][0]
+                                if actual_url.startswith("http"):
+                                    urls.add(unquote(actual_url))
+                        elif (
+                            href.startswith("http")
+                            and "duckduckgo.com" not in urlparse(href).netloc
+                        ):
+                            urls.add(
+                                unquote(href)
+                            )  # Direct link (less common in HTML version)
                     except Exception as e:
-                        logger.debug(f"Error in aggressive parsing for {href}: {e}")
+                        logger.debug(f"Error parsing DDG link {href}: {e}")
 
             logger.info(f"Extracted {len(urls)} unique URLs from DuckDuckGo HTML.")
             return list(urls)
@@ -1347,7 +1500,7 @@ class ImprovedManus(ToolCallAgent):
             return "No content was available for analysis."
 
         try:
-            cfg = config
+            cfg = get_config()
             ollama_settings = getattr(cfg, "ollama", None)
             if (
                 not ollama_settings
@@ -1375,7 +1528,7 @@ class ImprovedManus(ToolCallAgent):
                     combined_content[:max_input_len] + "\n\n[Input Content Truncated]"
                 )
 
-            prompt = f"""You are a research analyst. Analyze the following web content collected for the query: "{query}"
+            prompt = f'''You are a research analyst. Analyze the following web content collected for the query: "{query}"
 
 --- Collected Content (Sources are marked as '--- SOURCE [Number]: [URL] ---') ---
 {combined_content}
@@ -1389,7 +1542,7 @@ Based *only* on the text provided above:
 5. Cite sources using [Source N] format where N matches the number in the content.
 
 Provide a concise, well-structured response. If the content doesn't answer the query, state that. Do not add external knowledge.
-"""
+'''
 
             payload = {
                 "model": model_name,
@@ -1502,7 +1655,10 @@ Provide a concise, well-structured response. If the content doesn't answer the q
     async def _handle_website_overlays(self):
         """Handle cookie popups, paywalls, and other common website overlays."""
         logger.info("🛡️ Attempting to handle website overlays...")
-        # No need to get the browser_tool directly, we'll use execute_browser_use
+        browser_tool = self.available_tools.get_tool("browser_use")
+        if not browser_tool:
+            logger.error("BrowserUseTool not available.")
+            return
 
         # Use a list of scripts/actions to try sequentially
         actions_to_try = [
@@ -1571,23 +1727,14 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                 action_type = action_def["type"]
                 logger.debug(f"Overlay Action {i+1}: Type='{action_type}'")
                 if action_type == "evaluate":
-                    # For JavaScript evaluation, we need to use a different approach
-                    # The browser_use tool doesn't support direct script evaluation
-                    # Let's use a press action on common overlay elements instead
-                    try:
-                        # Try pressing Escape key first
-                        await self.execute_browser_use("press", selector="body", key="Escape")
-                        # Then try clicking on common overlay dismiss buttons
-                        await self.execute_browser_use("extract_content", goal="Find and dismiss any cookie consent popups or overlays")
-                        result = True
-                    except Exception as e:
-                        logger.debug(f"Error handling overlay: {e}")
-                        result = False
+                    result = await browser_tool.execute(
+                        "evaluate", script=action_def["script"]
+                    )
                     logger.debug(f" -> Result: {result}")
                     if result and str(result).lower() == "true":
                         time.sleep(0.7)  # Pause if script reported change
                 elif action_type == "press":
-                    await self.execute_browser_use("press", **action_def["args"])
+                    await browser_tool.execute("press", **action_def["args"])
                     logger.debug(f" -> Executed key press.")
                     time.sleep(0.5)
             except Exception as e:
@@ -1722,7 +1869,7 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         )
 
     async def _handle_str_replace_editor(self, command: ToolCall) -> str:
-        """Special handler for str_replace_editor to create files when they don't exist."""
+        '''Special handler for str_replace_editor to create files when they don't exist.'''
         args = {}
         args_str = command.function.arguments or "{}"
         try:
@@ -2225,7 +2372,7 @@ except Exception as e:
         """Placeholder: Extracts a specific section based on keywords."""
         # This needs a more robust implementation (e.g., using heading tags)
         pattern = re.compile(
-            f"(?:^|\n)[#\s]*{re.escape(section_name)}[^\n]*\n(.*?)(?:\n[#\s]*\w+|\Z)",
+            rf"(?:^|\n)[#\s]*{re.escape(section_name)}[^\n]*\n(.*?)(?:\n[#\s]*\w+|\Z)",
             re.IGNORECASE | re.DOTALL,
         )
         match = pattern.search(content)
@@ -2238,7 +2385,7 @@ except Exception as e:
         return f"(Section '{section_name}' not clearly identified)"
 
     def _process_content_for_task(self, url: str, content: str) -> None:
-        """Process extracted web content to fill TaskCompleter info."""
+        '''Process extracted web content to fill TaskCompleter info.'''
         if not self.task_completer:
             return
 
@@ -2289,7 +2436,7 @@ import asyncio  # Ensure asyncio is imported if used standalone
 
 
 def _slugify(text):
-    """Convert text into a filesystem-friendly slug."""
+    '''Convert text into a filesystem-friendly slug.'''
     text = str(text).lower()
     text = re.sub(r"&", "-and-", text)  # Replace &
     text = re.sub(r"[^a-z0-9\-\_]+", "-", text)  # Replace non-alphanumeric by -

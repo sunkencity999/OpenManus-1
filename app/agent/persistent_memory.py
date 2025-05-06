@@ -74,6 +74,8 @@ class PersistentMemory(ConversationMemory):
     Extends the ConversationMemory class with database storage and embedding-based retrieval.
     """
     
+    model_config = {"arbitrary_types_allowed": True}
+    
     # Database configuration
     db_path: str = Field(default=None)
     embedding_model: str = "text-embedding-3-small"
@@ -91,11 +93,11 @@ class PersistentMemory(ConversationMemory):
     memory_decay_rate: float = 0.1  # Rate at which memory importance decays per day
     
     # Caching settings
-    _embedding_cache: Dict[str, List[float]] = Field(default_factory=dict)
-    _cache_size: int = 100
+    embedding_cache: Dict[str, List[float]] = Field(default_factory=dict)
+    cache_size: int = 100
     
     # Connection management
-    _conn: Optional[sqlite3.Connection] = None
+    db_conn: Optional[sqlite3.Connection] = None
     
     @model_validator(mode="after")
     def initialize_database(self) -> "PersistentMemory":
@@ -135,14 +137,14 @@ class PersistentMemory(ConversationMemory):
     
     def _connect_db(self) -> None:
         """Connect to the SQLite database."""
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
+        if self.db_conn is None:
+            self.db_conn = sqlite3.connect(self.db_path)
+            self.db_conn.row_factory = sqlite3.Row
     
     def _create_tables(self) -> None:
         """Create the necessary database tables if they don't exist."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         # Create memories table
         cursor.execute('''
@@ -184,13 +186,13 @@ class PersistentMemory(ConversationMemory):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_memories_priority ON memories(priority)')
         
-        self._conn.commit()
+        self.db_conn.commit()
     
     def close(self) -> None:
         """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        if self.db_conn:
+            self.db_conn.close()
+            self.db_conn = None
     
     def __del__(self) -> None:
         """Ensure the database connection is closed when the object is deleted."""
@@ -199,8 +201,8 @@ class PersistentMemory(ConversationMemory):
     async def get_embedding(self, text: str) -> List[float]:
         """Get the embedding for a text string using OpenAI's API."""
         # Check cache first
-        if text in self._embedding_cache:
-            return self._embedding_cache[text]
+        if text in self.embedding_cache:
+            return self.embedding_cache[text]
         
         try:
             from openai import AsyncOpenAI
@@ -220,11 +222,11 @@ class PersistentMemory(ConversationMemory):
             embedding = response.data[0].embedding
             
             # Update cache
-            if len(self._embedding_cache) >= self._cache_size:
-                # Remove a random item if cache is full
-                self._embedding_cache.pop(next(iter(self._embedding_cache)))
+            if len(self.embedding_cache) >= self.cache_size:
+                # Remove oldest item if cache is full
+                self.embedding_cache.pop(next(iter(self.embedding_cache)))
             
-            self._embedding_cache[text] = embedding
+            self.embedding_cache[text] = embedding
             return embedding
             
         except Exception as e:
@@ -267,7 +269,7 @@ class PersistentMemory(ConversationMemory):
         )
         
         # Insert into database
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute('''
         INSERT INTO memories (text, source, timestamp, embedding, priority, tags, metadata)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -282,7 +284,7 @@ class PersistentMemory(ConversationMemory):
         ))
         
         memory_id = cursor.lastrowid
-        self._conn.commit()
+        self.db_conn.commit()
         
         # Schedule embedding computation (this would be done asynchronously in production)
         # For now, we'll just log that it needs to be done
@@ -293,17 +295,17 @@ class PersistentMemory(ConversationMemory):
     def update_memory_embedding(self, memory_id: int, embedding: List[float]) -> None:
         """Update the embedding for a stored memory."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute(
             "UPDATE memories SET embedding = ? WHERE id = ?",
             (json.dumps(embedding), memory_id)
         )
-        self._conn.commit()
+        self.db_conn.commit()
     
     def get_memory(self, memory_id: int) -> Optional[MemoryItem]:
         """Retrieve a specific memory by ID."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
         row = cursor.fetchone()
         
@@ -326,7 +328,7 @@ class PersistentMemory(ConversationMemory):
             List of memory items
         """
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         query = "SELECT * FROM memories"
         params = []
@@ -364,7 +366,7 @@ class PersistentMemory(ConversationMemory):
             List of (memory, relevance_score) tuples
         """
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         # Simple text search
         cursor.execute(
@@ -399,7 +401,7 @@ class PersistentMemory(ConversationMemory):
         query_embedding = await self.get_embedding(query)
         
         # Get all memories with embeddings
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute("SELECT * FROM memories WHERE embedding IS NOT NULL")
         rows = cursor.fetchall()
         
@@ -419,19 +421,19 @@ class PersistentMemory(ConversationMemory):
     def update_memory_priority(self, memory_id: int, priority: str) -> None:
         """Update the priority of a memory."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute(
             "UPDATE memories SET priority = ? WHERE id = ?",
             (priority, memory_id)
         )
-        self._conn.commit()
+        self.db_conn.commit()
     
     def delete_memory(self, memory_id: int) -> None:
         """Delete a memory from the database."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-        self._conn.commit()
+        self.db_conn.commit()
     
     def cleanup_old_memories(self, days_threshold: int = 30, 
                            keep_high_priority: bool = True) -> int:
@@ -446,7 +448,7 @@ class PersistentMemory(ConversationMemory):
             Number of memories deleted
         """
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         timestamp_threshold = time.time() - (days_threshold * 24 * 60 * 60)
         
@@ -462,7 +464,7 @@ class PersistentMemory(ConversationMemory):
             )
             
         deleted_count = cursor.rowcount
-        self._conn.commit()
+        self.db_conn.commit()
         
         return deleted_count
     
@@ -485,7 +487,7 @@ class PersistentMemory(ConversationMemory):
         if metadata is None:
             metadata = {}
             
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         cursor.execute('''
         INSERT INTO tasks (task_description, completed, timestamp, outcome, metadata)
         VALUES (?, ?, ?, ?, ?)
@@ -498,14 +500,14 @@ class PersistentMemory(ConversationMemory):
         ))
         
         task_id = cursor.lastrowid
-        self._conn.commit()
+        self.db_conn.commit()
         
         return task_id
     
     def update_task(self, task_id: int, completed: bool, outcome: Optional[str] = None) -> None:
         """Update the status of a task."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         if outcome is not None:
             cursor.execute(
@@ -518,12 +520,12 @@ class PersistentMemory(ConversationMemory):
                 (completed, task_id)
             )
             
-        self._conn.commit()
+        self.db_conn.commit()
     
     def get_recent_tasks(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Get the most recent tasks."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         cursor.execute(
             "SELECT * FROM tasks ORDER BY timestamp DESC LIMIT ?",
@@ -543,7 +545,7 @@ class PersistentMemory(ConversationMemory):
     def store_preference(self, key: str, value: str) -> None:
         """Store a user preference."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         # Check if preference already exists
         cursor.execute("SELECT id FROM preferences WHERE key = ?", (key,))
@@ -562,12 +564,12 @@ class PersistentMemory(ConversationMemory):
                 (key, value, time.time())
             )
             
-        self._conn.commit()
+        self.db_conn.commit()
     
     def get_preference(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get a stored user preference."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         cursor.execute("SELECT value FROM preferences WHERE key = ?", (key,))
         row = cursor.fetchone()
@@ -579,7 +581,7 @@ class PersistentMemory(ConversationMemory):
     def get_all_preferences(self) -> Dict[str, str]:
         """Get all stored user preferences."""
         self._connect_db()
-        cursor = self._conn.cursor()
+        cursor = self.db_conn.cursor()
         
         cursor.execute("SELECT key, value FROM preferences")
         rows = cursor.fetchall()
