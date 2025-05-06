@@ -466,36 +466,59 @@ class ImprovedManus(ToolCallAgent):
         if name == "ask_human":
             question = args.get("inquire")
             if question:
-                # Record the question in the tool tracker
-                self.tool_tracker.record_question(question)
+                # Check for important keywords that indicate the question should always be asked
+                important_keywords = [
+                    "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
+                    "decide", "opinion", "want", "need", "should", "would you", "do you", "can you",
+                    "provide", "overview", "structure", "details", "specifics", "requirements"
+                ]
                 
-                if self._is_redundant_question(question):
-                    observation = (
-                        f"Observation: Question '{question}' seems redundant. Skipping."
-                    )
-                    logger.warning(f"Redundant question skipped: {question}")
-                    # Return observation directly, no tool execution needed
-                    return observation
+                # Force asking the question if it contains important keywords
+                force_ask = any(keyword in question.lower() for keyword in important_keywords)
+                
+                # Record the question in the tool tracker - but only if we're not forcing it
+                # This prevents the question from being marked as asked if we're forcing it
+                if not force_ask:
+                    self.tool_tracker.record_question(question)
+                
+                # Only check for redundancy if not forcing the question
+                if not force_ask and self._is_redundant_question(question):
+                    # Check if we've been asking the same question repeatedly
+                    # If so, we should just ask it anyway to break the loop
+                    repeated_count = sum(1 for q in self.tool_tracker.asked_questions 
+                                      if self._calculate_similarity(q, question) > 0.8)
+                    
+                    if repeated_count >= 3:
+                        logger.warning(f"Question '{question}' has been filtered multiple times. Forcing it to break potential loop.")
+                    else:
+                        observation = (f"Observation: Question '{question}' seems redundant. Skipping.")
+                        logger.warning(f"Redundant question skipped: {question}")
+                        # Return observation directly, no tool execution needed
+                        return observation
 
-                better_tool_suggestion = await self._suggest_better_tool(name, args)
-                if better_tool_suggestion:
-                    suggested_tool_name = better_tool_suggestion.get("tool")
-                    suggested_args = better_tool_suggestion.get("args", {})
-                    logger.info(
-                        f"🔄 Intercepted '{name}'. Using better tool: '{suggested_tool_name}' for question: '{question}'"
-                    )
+                # Only suggest better tools if we're not forcing the question
+                if not force_ask:
+                    better_tool_suggestion = await self._suggest_better_tool(name, args)
+                    if better_tool_suggestion:
+                        suggested_tool_name = better_tool_suggestion.get("tool")
+                        suggested_args = better_tool_suggestion.get("args", {})
+                        logger.info(f"🔄 Intercepted '{name}'. Using better tool: '{suggested_tool_name}' for question: '{question}'")
 
-                    # Create a new ToolCall for the suggested tool
-                    suggested_command = ToolCall(
-                        id=f"suggested_{command.id}",
-                        type="function",
-                        function={
-                            "name": suggested_tool_name,
-                            "arguments": json.dumps(suggested_args),
-                        },
-                    )
-                    # Execute the suggested tool using this same execute_tool flow (recursive but safe due to checks)
-                    return await self.execute_tool(suggested_command)
+                        # Create a new ToolCall for the suggested tool
+                        suggested_command = ToolCall(
+                            id=f"suggested_{command.id}",
+                            type="function",
+                            function={
+                                "name": suggested_tool_name,
+                                "arguments": json.dumps(suggested_args),
+                            },
+                        )
+                        # Execute the suggested tool using this same execute_tool flow (recursive but safe due to checks)
+                        return await self.execute_tool(suggested_command)
+                        
+                if force_ask:
+                    logger.info(f"🔑 Forcing important question: {question}")
+                    
             # If no suggestion or not a question, proceed with SmartAskHuman via super().execute_tool
 
         # --- Standard Tool Execution via Base Class ---
@@ -1737,9 +1760,10 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             except Exception as e:
                 logger.debug(f"Error during overlay action {i+1} ({action_type}): {e}")
 
-        logger.info("🛡️ Finished overlay handling attempts.")
+        logger.info("🔑 Finished overlay handling attempts.")
 
-        return valid_urls
+        # Return True to indicate overlay handling is complete
+        return True
 
     def _extract_urls(self, text: str) -> List[str]:
         """Extract all URLs from the given text using robust regex patterns."""
@@ -1823,30 +1847,83 @@ Provide a concise, well-structured response. If the content doesn't answer the q
 
         return False
 
+    def _calculate_similarity(self, str1: str, str2: str) -> float:
+        """Calculate similarity between two strings.
+        
+        This is a simple implementation using word overlap.
+        
+        Args:
+            str1: First string
+            str2: Second string
+            
+        Returns:
+            Similarity score between 0 and 1
+        """
+        # Normalize strings
+        str1 = str1.lower().strip()
+        str2 = str2.lower().strip()
+        
+        # Simple word overlap similarity
+        words1 = set(str1.split())
+        words2 = set(str2.split())
+        
+        if not words1 or not words2:
+            return 0.0
+            
+        overlap = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return overlap / union if union > 0 else 0.0
+    
     def _is_redundant_question(self, question: str) -> bool:
         """Check if a question is redundant based on conversation history."""
         if not self._prevent_repeated_questions:
             return False
+            
+        # Always allow questions with certain keywords that indicate they're important
+        important_keywords = [
+            "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
+            "decide", "opinion", "want", "need", "should", "would you", "do you", "can you",
+            "provide", "overview", "structure", "details", "specifics", "requirements"
+        ]
+        
+        # Check if the question contains any important keywords
+        if any(keyword in question.lower() for keyword in important_keywords):
+            logger.info(f"🔑 Allowing important question with key terms: {question}")
+            return False
+            
         question_norm = question.strip().lower()
-
-        # Check using PersistentMemory's similarity check
+        
+        # Only consider exact matches as redundant
+        for prev_question in self.tool_tracker.asked_questions:
+            prev_norm = prev_question.strip().lower()
+            if question_norm == prev_norm:
+                logger.warning(f"🔄 Avoiding exactly repeated question: {question}")
+                return True
+                
+        # For non-exact matches, use a more lenient approach
         try:
-            # is_similar_question is synchronous and doesn't take threshold
-            if self.conversation_memory.is_similar_question(question_norm):
-                logger.warning(
-                    f"🔄 Avoiding redundant question (memory similarity): {question}"
-                )
+            # Check for very high similarity (only if nearly identical)
+            if self.conversation_memory.is_similar_question(question_norm) and len(self.tool_tracker.asked_questions) > 5:
+                # Extract question words (what, who, when, where, why, how)
+                q_words_pattern = r'\b(what|who|when|where|why|how)\b'
+                import re
+                q_words = set(re.findall(q_words_pattern, question_norm))
+                
+                # Only consider it redundant if we've asked many questions and this one is very similar
+                # But even then, allow different question types (what vs how, etc.)
+                for prev_question in self.tool_tracker.asked_questions:
+                    prev_q_words = set(re.findall(q_words_pattern, prev_question.lower()))
+                    if q_words and prev_q_words and q_words != prev_q_words:
+                        # Different question type, allow it
+                        return False
+                        
+                logger.warning(f"🔄 Avoiding redundant question (memory similarity): {question}")
                 return True
         except Exception as e:
             logger.error(f"Error checking memory for similar question: {e}")
 
-        # Fallback: Check tool tracker history
-        if self.tool_tracker.was_question_asked(question_norm):
-            logger.warning(
-                f"🔄 Avoiding redundant question (tracker history): {question}"
-            )
-            return True
-
+        # Default to allowing the question if we're not sure
         return False
 
     def _get_most_relevant_url(self, query: str) -> Optional[str]:
@@ -1898,6 +1975,18 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             editor_command = args.get("command")
             path_str = args.get("path")
             file_text = args.get("file_text", "")
+            
+            # Create directory structure if it doesn't exist (for 'create' command)
+            if editor_command == "create" and path_str:
+                import os
+                directory = os.path.dirname(path_str)
+                if directory and not os.path.exists(directory):
+                    try:
+                        os.makedirs(directory, exist_ok=True)
+                        logger.info(f"Created directory structure: {directory}")
+                    except Exception as e:
+                        logger.error(f"Error creating directory structure: {e}")
+                        return f"Error: Failed to create directory structure for {path_str}: {str(e)}"
 
             if not path_str:
                 return "Error executing str_replace_editor: Missing 'path' parameter"

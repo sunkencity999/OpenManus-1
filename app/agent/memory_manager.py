@@ -275,11 +275,31 @@ class ToolUsageTracker(BaseModel):
         """
         # Simple implementation using string similarity
         # In a real implementation, use embedding similarity or more sophisticated NLP
+        
+        # Check for exact matches first (case-insensitive)
+        normalized_question = question.strip().lower()
+        for asked in self.asked_questions:
+            normalized_asked = asked.strip().lower()
+            if normalized_question == normalized_asked:
+                return True
+                
+        # For non-exact matches, use a lower similarity threshold
+        # to avoid being too aggressive in filtering out questions
         for asked in self.asked_questions:
             # Calculate similarity (simple implementation)
             similarity = self._calculate_similarity(question, asked)
-            if similarity > 0.8:  # Threshold for similarity
-                return True
+            if similarity > 0.6:  # Lower threshold for similarity (was 0.8)
+                # Only consider it a match if the key parts of the question are the same
+                # Extract question words (what, who, when, where, why, how)
+                q_words_pattern = r'\b(what|who|when|where|why|how)\b'
+                import re
+                q_words_question = set(re.findall(q_words_pattern, normalized_question.lower()))
+                q_words_asked = set(re.findall(q_words_pattern, asked.lower()))
+                
+                # If both questions have the same question words and high similarity, consider it a match
+                if q_words_question and q_words_asked and q_words_question == q_words_asked and similarity > 0.7:
+                    return True
+                    
         return False
         
     def record_question(self, question: str) -> None:

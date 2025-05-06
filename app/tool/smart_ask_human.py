@@ -52,18 +52,35 @@ class SmartAskHuman(BaseTool):
         Returns:
             The human's response
         """
+        # Always ask the question if it contains certain keywords that indicate it's important
+        force_ask = False
+        important_keywords = [
+            "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
+            "decide", "opinion", "want", "need", "should", "would you", "do you", "can you"
+        ]
+        
+        # Check if the question contains any important keywords
+        if any(keyword in inquire.lower() for keyword in important_keywords):
+            force_ask = True
+        
         # If we have a context manager, check if we should skip this question
         if self._context_manager:
             # Use a generic context key based on the question
             context_key = f"user_response_{hash(inquire) % 10000}"
             
-            # Check if we already have this information
+            # Check if we already have this information and it's not a forced question
             existing = self._context_manager.get_context(context_key)
-            if existing:
+            if existing and not force_ask:
                 return f"[Using existing information: {existing.value}]"
             
             # Record that we asked a question
-            self._context_manager.record_question(inquire)
+            # Use add_question for PersistentMemory or record_question for ToolUsageTracker
+            if hasattr(self._context_manager, 'add_question'):
+                self._context_manager.add_question(inquire)
+            elif hasattr(self._context_manager, 'record_question'):
+                self._context_manager.record_question(inquire)
+            else:
+                print(f"Warning: Context manager doesn't have add_question or record_question method: {type(self._context_manager).__name__}")
             
             # Ask the human
             response = input(f"""Bot: {inquire}\n\nYou: """).strip()
