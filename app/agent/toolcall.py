@@ -164,13 +164,22 @@ class ToolCallAgent(ReActAgent):
         return "\n\n".join(results)
 
     async def execute_tool(self, command: ToolCall) -> str:
-        """Execute a single tool call with robust error handling"""
+        """Execute a single tool call with robust error handling and loop prevention"""
         if not command or not command.function or not command.function.name:
             return "Error: Invalid command format"
 
         name = command.function.name
         if name not in self.available_tools.tool_map:
             return f"Error: Unknown tool '{name}'"
+
+        # Initialize tool call tracking if it doesn't exist
+        if not hasattr(self, '_recent_tool_calls'):
+            self._recent_tool_calls = []
+
+        # Check for repeated tool usage patterns that might indicate a loop
+        recent_same_tool = sum(1 for t in self._recent_tool_calls[-3:] if t == name)
+        if recent_same_tool >= 2:
+            return f"Error: Tool '{name}' has been called too many times in a row. Please try a different approach or provide more specific instructions."
 
         try:
             # Parse arguments
@@ -180,8 +189,16 @@ class ToolCallAgent(ReActAgent):
             logger.info(f"🔧 Activating tool: '{name}'...")
             result = await self.available_tools.execute(name=name, tool_input=args)
 
+            # Update tool call history
+            self._recent_tool_calls = (self._recent_tool_calls + [name])[-10:]  # Keep last 10 tool calls
+
+            # If we got meaningful output, clear the recent tool calls to allow retries
+            if result and len(str(result)) > 50:  # If result is substantial
+                self._recent_tool_calls = []
+
             # Handle special tools
             await self._handle_special_tool(name=name, result=result)
+
 
             # Check if result is a ToolResult with base64_image
             if hasattr(result, "base64_image") and result.base64_image:

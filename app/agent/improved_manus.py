@@ -2000,91 +2000,94 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         )
 
     async def _handle_str_replace_editor(self, command: ToolCall) -> str:
-        """Special handler for str_replace_editor to create files when they don't exist."""
-        args = {}
+        """Special handler for str_replace_editor to create files and handle content writing."""
         args_str = command.function.arguments or "{}"
         try:
             args = json.loads(args_str)
-            editor_command = args.get("command")
-            path_str = args.get("path")
+            path_str = args.get("path", "")
+            editor_command = args.get("command", "").lower()
             file_text = args.get("file_text", "")
             
-            # Create directory structure if it doesn't exist (for 'create' command)
-            if editor_command == "create" and path_str:
-                import os
-                directory = os.path.dirname(path_str)
-                if directory and not os.path.exists(directory):
-                    try:
-                        os.makedirs(directory, exist_ok=True)
-                        logger.info(f"Created directory structure: {directory}")
-                    except Exception as e:
-                        logger.error(f"Error creating directory structure: {e}")
-                        return f"Error: Failed to create directory structure for {path_str}: {str(e)}"
-
             if not path_str:
-                # Generate a contextually appropriate filename based on the task
-                if hasattr(self, 'task_completer') and self.task_completer:
-                    task_type = getattr(self.task_completer, 'task_type', '')
-                    if task_type:
-                        # Create appropriate filename based on task type with numbering to avoid overwriting
-                        if task_type == "poem":
-                            base_path = "workspace/poem"
-                            extension = ".txt"
-                        elif task_type == "blog_post":
-                            base_path = "workspace/blog_post"
-                            extension = ".md"
-                        elif task_type == "research_report":
-                            base_path = "workspace/research_report"
-                            extension = ".md"
-                        elif task_type == "website":
-                            # For websites, create a uniquely named folder
-                            counter = 1
-                            while os.path.exists(os.path.join(config.workspace_root, f"workspace/website_{counter}")):
-                                counter += 1
-                            path_str = f"workspace/website_{counter}/index.html"
-                            # Skip the rest of the numbering logic for websites
-                            continue_with_path = True
-                        else:
-                            # Default with timestamp to avoid overwriting
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            path_str = f"workspace/{task_type}_{timestamp}.txt"
-                            # Skip the rest of the numbering logic for timestamped files
-                            continue_with_path = True
-                            
-                        # Add numbering to avoid overwriting (for non-website, non-timestamped files)
-                        if not locals().get('continue_with_path', False):
-                            counter = 1
-                            path_str = f"{base_path}{extension}"
-                            
-                            # Check if the file exists and increment counter until we find an unused name
-                            while os.path.exists(os.path.join(config.workspace_root, path_str)):
-                                path_str = f"{base_path}_{counter}{extension}"
-                                counter += 1
-                                
-                            # Reset the continue_with_path flag for the next iteration
-                            if 'continue_with_path' in locals():
-                                del continue_with_path
-                    else:
-                        # Fallback if task_type is not available
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        path_str = f"workspace/document_{timestamp}.txt"
-                else:
-                    # Fallback if task_completer is not available
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    path_str = f"workspace/document_{timestamp}.txt"
-                    
-                logger.info(f"Generated contextual path: {path_str}")
-                # Update the args with the generated path
+                # Generate a default path if none provided
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path_str = f"workspace/document_{timestamp}.txt"
                 args["path"] = path_str
                 command.function.arguments = json.dumps(args)
             
-            workspace_path = Path(config.workspace_root)
-            target_path = (workspace_path / path_str).resolve()
+            target_path = Path(path_str)
+            if not target_path.is_absolute():
+                target_path = Path(config.workspace_root) / path_str
 
-            if not target_path.is_relative_to(workspace_path):
-                logger.error(f"Security Alert: Path outside workspace: {target_path}")
-                return f"Error: Access denied. Path '{path_str}' is outside workspace."
-
+            # Create parent directories if they don't exist
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Check for creative content generation before file operations
+            if editor_command == "create" and file_text and self._is_creative_content_description(file_text):
+                generated_content = await self._generate_creative_content(file_text)
+                if generated_content:
+                    # Update the file_text with generated content
+                    file_text = generated_content
+                    args["file_text"] = file_text
+                    command.function.arguments = json.dumps(args)
+                    logger.info(f"Generated creative content for: {file_text[:100]}...")
+            
+            # Handle different editor commands
+            if editor_command == "view":
+                if not target_path.exists():
+                    try:
+                        target_path.touch()
+                        logger.info(f"📄 Created missing file for viewing: {target_path}")
+                        args_with_message = args.copy()
+                        args_with_message["message"] = "Created missing file"
+                        self.tool_tracker.record_tool_usage(
+                            "str_replace_editor", args_with_message, "success"
+                        )
+                        return f"Observed output of cmd `str_replace_editor`: File '{path_str}' did not exist and was created empty."
+                    except Exception as e:
+                        logger.error(f"Failed to create missing file {target_path}: {e}")
+                        return f"Error executing str_replace_editor: Failed to create file '{path_str}'. {str(e)}"
+                else:
+                    try:
+                        with open(target_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        return f"File content:\n{content}"
+                    except Exception as e:
+                        return f"Error reading file: {str(e)}"
+            
+            # Handle create/write commands
+            elif editor_command in ["create", "write"]:
+                try:
+                    mode = 'w' if editor_command == "create" or not target_path.exists() else 'a'
+                    with open(target_path, mode, encoding='utf-8') as f:
+                        f.write(file_text)
+                    
+                    action = "Created" if mode == 'w' else "Updated"
+                    logger.info(f"✅ {action} file: {target_path}")
+                    
+                    # Record successful tool usage
+                    args_with_message = args.copy()
+                    args_with_message["message"] = f"{action} file successfully"
+                    self.tool_tracker.record_tool_usage(
+                        "str_replace_editor", args_with_message, "success"
+                    )
+                    
+                    # Return success message with file path and preview
+                    preview = file_text[:200] + ("..." if len(file_text) > 200 else "")
+                    return (
+                        f"Observed output of cmd `str_replace_editor` executed:\n"
+                        f"{action} file successfully at: {path_str}\n\n"
+                        f"Preview:\n{preview}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Failed to write to file {target_path}: {e}")
+                    args_with_message = args.copy()
+                    args_with_message["message"] = f"Failed to write to file: {e}"
+                    self.tool_tracker.record_tool_usage(
+                        "str_replace_editor", args_with_message, "failure"
+                    )
+                    return f"Error executing str_replace_editor: Failed to write to file '{path_str}'. {str(e)}"
 
             # Check if this is a creative content task that needs generation
             if editor_command == "create" and file_text and len(file_text) < 100 and self._is_creative_content_description(file_text):
@@ -2094,50 +2097,6 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     args["file_text"] = generated_content
                     command.function.arguments = json.dumps(args)
                     logger.info(f"Generated creative content for '{file_text}'")
-
-            logger.info(
-                f"Executing str_replace_editor: cmd='{editor_command}', path='{target_path}'"
-            )
-
-            # Create the file if it doesn't exist for viewing
-            if editor_command == "view" and not target_path.exists():
-                try:
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.touch()
-                    logger.info(f"📄 Created missing file for viewing: {target_path}")
-                    # Update args to include the status message
-                    args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
-                    args_with_message["message"] = "Created missing file"
-                    self.tool_tracker.record_tool_usage(
-                        "str_replace_editor", args_with_message, "success"
-                    )
-                    return f"Observed output of cmd `str_replace_editor`: File '{path_str}' did not exist and was created empty."
-                except Exception as e:
-                    logger.error(f"Failed to create missing file {target_path}: {e}")
-                    # Update args to include the status message
-                    args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
-                    args_with_message["message"] = f"Failed to create missing file: {e}"
-                    self.tool_tracker.record_tool_usage(
-                        "str_replace_editor",
-                        args_with_message,
-                        "failure"
-                    )
-                    return f"Error executing str_replace_editor: Failed to create file '{path_str}'. {str(e)}"
-                    
-            # Handle 'create' command when file already exists by using 'write' instead
-            if editor_command == "create" and target_path.exists():
-                logger.info(f"File already exists at {target_path}, using 'write' instead of 'create'")
-                # Instead of using str_replace with empty strings (which causes errors),
-                # directly write the content to the file
-                file_text = args.get("file_text", "")
-                try:
-                    with open(target_path, 'w') as f:
-                        f.write(file_text)
-                    logger.info(f"Successfully wrote content to existing file: {target_path}")
-                    return f"Observed output of cmd `str_replace_editor` executed:\nFile updated successfully at: {path_str}"
-                except Exception as e:
-                    logger.error(f"Failed to write to file {target_path}: {e}")
-                    return f"Error: Failed to write to file {path_str}. {str(e)}"
 
             # Execute original command via base class
             result_str = await super().execute_tool(command)
@@ -2167,17 +2126,65 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             
     def _is_creative_content_description(self, text: str) -> bool:
         """Determine if the text is a description of creative content that needs to be generated."""
+        if not text or len(text.strip()) < 10:  # Skip very short texts
+            return False
+            
+        text_lower = text.lower().strip()
+        
         # Check for common patterns that indicate a creative content description
         creative_indicators = [
-            "poem about", "write a poem", "create a poem", "in the style of", 
-            "story about", "write a story", "create a story",
-            "essay on", "write an essay", "create an essay",
-            "song about", "write a song", "create a song",
-            "script for", "write a script", "create a script"
+            # Essay patterns
+            "write a", "create a", "compose a", "draft a", "generate a",
+            "write an", "create an", "compose an", "draft an", "generate an",
+            "essay about", "essay on", "long-form essay", "academic paper",
+            "research paper", "article about", "blog post", "write about",
+            
+            # Other creative content types
+            "poem about", "in the style of", "story about", "song about",
+            "script for", "letter to", "speech about", "report on",
+            "review of", "analysis of", "summary of"
         ]
         
-        text_lower = text.lower()
-        return any(indicator in text_lower for indicator in creative_indicators)
+        # Check for content type indicators
+        content_types = [
+            "essay", "article", "story", "poem", "song", "script",
+            "letter", "speech", "report", "review", "analysis", "summary",
+            "blog post", "paper", "thesis", "dissertation"
+        ]
+        
+        # Check for task verbs
+        task_verbs = [
+            "write", "create", "compose", "draft", "generate",
+            "develop", "produce", "prepare", "construct", "formulate"
+        ]
+        
+        # Check for length indicators
+        length_indicators = [
+            "long-form", "detailed", "comprehensive", "in-depth",
+            "thorough", "extensive", "lengthy", "brief"
+        ]
+        
+        # Check for any creative indicators
+        has_creative_indicator = any(indicator in text_lower for indicator in creative_indicators)
+        
+        # Check for content type + task verb pattern
+        has_content_task_pattern = any(
+            (f"{verb} {content}" in text_lower or f"{verb} a {content}" in text_lower)
+            for verb in task_verbs
+            for content in content_types
+        )
+        
+        # Check for length indicators
+        has_length_indicator = any(indicator in text_lower for indicator in length_indicators)
+        
+        # Check for question-like patterns
+        is_question = text_lower.endswith("?")
+        
+        # Consider it creative content if:
+        # 1. It has explicit creative indicators, OR
+        # 2. It has a content type + task verb pattern, AND
+        # 3. It's not a question (questions are better handled by research)
+        return (has_creative_indicator or has_content_task_pattern) and not is_question
     
     async def _generate_creative_content(self, description: str) -> str:
         """Generate creative content based on the description."""
@@ -2369,38 +2376,86 @@ except Exception as e:
                 "args": {"action": "go_to_url", "url": urls[0]},
             }
 
-        # 3. Research/Information -> browser_use for web research
+        # 3. Creative Content Generation -> Generate directly using str_replace_editor
+        if self._is_creative_content_description(question):
+            logger.info("Creative content generation task detected. Generating content with str_replace_editor.")
+            # Generate a filename based on the content type and topic
+            content_type = "essay"
+            if "poem" in q_lower:
+                content_type = "poem"
+            elif "story" in q_lower:
+                content_type = "story"
+                
+            # Extract the main topic for the filename
+            topic = "creative_content"
+            topic_match = re.search(r'(?:about|on|regarding|re:?)\s+(.+?)(?:\?|$)', question, re.IGNORECASE)
+            if topic_match:
+                topic = topic_match.group(1).strip()
+                
+            # Create a clean filename
+            from pathlib import Path
+            filename = f"{content_type}_{_slugify(topic)}.md"
+            filepath = str(Path(config.workspace_root) / filename)
+            
+            # Generate the content
+            content = await self._generate_creative_content(question)
+            
+            return {
+                "tool": "str_replace_editor",
+                "args": {
+                    "command": "create",
+                    "path": filepath,
+                    "file_text": content
+                }
+            }
+        
+        # 4. Research/Information -> browser_use for web research
         research_keywords = [
-            "what is",
-            "who is",
-            "tell me about",
-            "explain",
-            "define",
-            "history of",
-            "how does",
-            "why is",
-            "compare",
-            "pros cons",
-            "find info on",
-            "news on",
-            "statistics for",
-            "example of",
-            "template for",
-            "design for",
-            "layout for",
-            "modern",
-            "best practice"
+            "what is", "who is", "when was", "where is", "why is", "how to",
+            "tell me about", "explain", "define", "history of", "how does",
+            "compare", "pros cons", "find info on", "news on", "statistics for",
+            "example of", "template for", "design for", "layout for", "modern",
+            "best practice", "biography of", "about", "information on",
+            "details about", "facts about", "who was", "what are", "how many",
+            "how much", "when did", "where did", "why did", "how did",
+            "what caused", "what happened", "what makes", "what are the",
+            "how to use", "how to make", "how to create", "how to build",
+            "how to install", "how to set up", "how to configure",
+            "tutorial on", "guide to", "tips for", "best way to", "how can i",
+            "what do you know about", "can you tell me about", "i need information on",
+            "looking for information about", "search for", "find me", "show me"
         ]
-        if (
-            (q_lower.endswith("?") or "what" in q_lower or "how" in q_lower)
-            and len(question) > 15
+        
+        # Check if this is a factual or research question
+        is_research_question = (
+            (q_lower.endswith("?") or 
+             any(q_word in q_lower for q_word in ["what", "who", "when", "where", "why", "how"])) 
+            and len(question) > 10
             and any(kw in q_lower for kw in research_keywords)
-        ):
+        )
+        
+        # Also check for questions that are statements but clearly researchable
+        is_research_statement = (
+            not q_lower.endswith("?") 
+            and any(kw in q_lower for kw in ["find", "search", "look up", "research"])
+            and any(kw in q_lower for kw in ["about", "on", "for"])
+        )
+        
+        if is_research_question or is_research_statement:
             # Extract key search terms from the question
             search_query = question.replace("?", "").strip()
+            
             # For certain types of questions, create a more specific search query
-            if "example" in q_lower or "template" in q_lower or "design" in q_lower or "layout" in q_lower:
+            if any(kw in q_lower for kw in ["example", "template", "design", "layout"]):
                 search_query = f"examples of {search_query}"
+            elif any(kw in q_lower for kw in ["biography", "about", "who is", "who was"]):
+                search_query = f"{search_query} biography"
+            elif any(kw in q_lower for kw in ["history", "historical"]):
+                search_query = f"{search_query} history"
+            
+            # Clean up the query
+            search_query = re.sub(r'^(can you|please|could you|would you|i need|i want|find|search|look up|research|information on|about|on|for)', '', search_query, flags=re.IGNORECASE)
+            search_query = re.sub(r'\s+', ' ', search_query).strip()
             
             # Use browser_use with a search URL
             search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"

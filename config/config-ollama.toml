@@ -1,0 +1,16 @@
+# Global LLM configuration
+[llm]
+api_type = 'ollama'
+model = "llama3.2"
+base_url = "http://localhost:11434"  # Removed /v1 as Ollama doesn't use OpenAI-style versioning
+api_key = "ollama"
+max_tokens = 4096
+temperature = 0.0
+
+[llm.vision]
+api_type = 'ollama'
+model = "llama3.2-vision"
+base_url = "http://localhost:11434"  # Removed /v1 as Ollama doesn't use OpenAI-style versioning
+api_key = "ollama"
+max_tokens = 4096
+temperature = 0.0
