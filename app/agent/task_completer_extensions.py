@@ -406,17 +406,19 @@ def _create_website(self) -> str:
     
     # Create folder structure
     import os
-    from pathlib import Path
     
-    # Create base directory
-    base_dir = Path(os.getcwd()) / folder_name
+    # Use workspace folder as the base directory
+    workspace_dir = os.path.join(os.getcwd(), "workspace")
+    os.makedirs(workspace_dir, exist_ok=True)  # Create workspace folder if it doesn't exist
+    
+    # Create the project folder inside the workspace
+    base_dir = os.path.join(workspace_dir, folder_name)
     os.makedirs(base_dir, exist_ok=True)
     
     # Create subdirectories
     for subdir in ["css", "js", "images"]:
-        os.makedirs(base_dir / subdir, exist_ok=True)
+        os.makedirs(os.path.join(base_dir, subdir), exist_ok=True)
     
-    # Create HTML files for each page
     pages = ["index", "projects", "services", "contact"]
     
     # Create CSS file

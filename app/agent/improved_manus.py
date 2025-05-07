@@ -54,7 +54,8 @@ class ImprovedManus(ToolCallAgent):
     next_step_prompt: str = IMPROVED_NEXT_STEP_PROMPT
 
     max_observe: int = 15000  # Increased observation length for web content
-    max_steps: int = 25  # Increased max steps slightly
+    max_steps: int = 10  # Default to a reasonable number of steps
+    dynamic_steps: bool = True  # Enable dynamic step adjustment based on task complexity
 
     # MCP clients for remote tool access
     mcp_clients: MCPClients = Field(default_factory=MCPClients)
@@ -382,6 +383,23 @@ class ImprovedManus(ToolCallAgent):
                         logger.info(
                             f"Task analysis set required context: {required_context}"
                         )
+                    
+                    # Adjust max_steps based on task complexity if dynamic_steps is enabled
+                    if self.dynamic_steps:
+                        # Base the number of steps on the plan complexity
+                        num_steps = len(plan.steps)
+                        # Simple tasks (1-2 steps) need fewer iterations
+                        if num_steps <= 2:
+                            self.max_steps = max(5, num_steps * 3)  # At least 5 steps
+                        # Medium complexity tasks (3-5 steps)
+                        elif num_steps <= 5:
+                            self.max_steps = max(10, num_steps * 3)  # At least 10 steps
+                        # Complex tasks (more than 5 steps)
+                        else:
+                            # Allow up to 25 steps for complex tasks
+                            self.max_steps = min(25, max(15, num_steps * 3))
+                            
+                        logger.info(f"Dynamically adjusted max_steps to {self.max_steps} based on task complexity")
 
                     logger.info(f"📋 Task plan created with {len(plan.steps)} steps:")
                     for i, step in enumerate(plan.steps):
@@ -2004,14 +2022,69 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                         return f"Error: Failed to create directory structure for {path_str}: {str(e)}"
 
             if not path_str:
-                return "Error executing str_replace_editor: Missing 'path' parameter"
-
+                # Generate a contextually appropriate filename based on the task
+                if hasattr(self, 'task_completer') and self.task_completer:
+                    task_type = getattr(self.task_completer, 'task_type', '')
+                    if task_type:
+                        # Create appropriate filename based on task type with numbering to avoid overwriting
+                        if task_type == "poem":
+                            base_path = "workspace/poem"
+                            extension = ".txt"
+                        elif task_type == "blog_post":
+                            base_path = "workspace/blog_post"
+                            extension = ".md"
+                        elif task_type == "research_report":
+                            base_path = "workspace/research_report"
+                            extension = ".md"
+                        elif task_type == "website":
+                            # For websites, create a uniquely named folder
+                            counter = 1
+                            while os.path.exists(os.path.join(config.workspace_root, f"workspace/website_{counter}")):
+                                counter += 1
+                            path_str = f"workspace/website_{counter}/index.html"
+                            # Skip the rest of the numbering logic for websites
+                            continue_with_path = True
+                        else:
+                            # Default with timestamp to avoid overwriting
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            path_str = f"workspace/{task_type}_{timestamp}.txt"
+                            # Skip the rest of the numbering logic for timestamped files
+                            continue_with_path = True
+                            
+                        # Add numbering to avoid overwriting (for non-website, non-timestamped files)
+                        if not locals().get('continue_with_path', False):
+                            counter = 1
+                            path_str = f"{base_path}{extension}"
+                            
+                            # Check if the file exists and increment counter until we find an unused name
+                            while os.path.exists(os.path.join(config.workspace_root, path_str)):
+                                path_str = f"{base_path}_{counter}{extension}"
+                                counter += 1
+                                
+                            # Reset the continue_with_path flag for the next iteration
+                            if 'continue_with_path' in locals():
+                                del continue_with_path
+                    else:
+                        # Fallback if task_type is not available
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        path_str = f"workspace/document_{timestamp}.txt"
+                else:
+                    # Fallback if task_completer is not available
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    path_str = f"workspace/document_{timestamp}.txt"
+                    
+                logger.info(f"Generated contextual path: {path_str}")
+                # Update the args with the generated path
+                args["path"] = path_str
+                command.function.arguments = json.dumps(args)
+            
             workspace_path = Path(config.workspace_root)
             target_path = (workspace_path / path_str).resolve()
 
             if not target_path.is_relative_to(workspace_path):
                 logger.error(f"Security Alert: Path outside workspace: {target_path}")
                 return f"Error: Access denied. Path '{path_str}' is outside workspace."
+
 
             # Check if this is a creative content task that needs generation
             if editor_command == "create" and file_text and len(file_text) < 100 and self._is_creative_content_description(file_text):
@@ -2051,17 +2124,20 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     )
                     return f"Error executing str_replace_editor: Failed to create file '{path_str}'. {str(e)}"
                     
-            # Handle 'create' command when file already exists by using 'str_replace' instead
+            # Handle 'create' command when file already exists by using 'write' instead
             if editor_command == "create" and target_path.exists():
-                logger.info(f"File already exists at {target_path}, using 'str_replace' instead of 'create'")
-                # Modify the command to 'str_replace' instead of 'create'
+                logger.info(f"File already exists at {target_path}, using 'write' instead of 'create'")
+                # Instead of using str_replace with empty strings (which causes errors),
+                # directly write the content to the file
                 file_text = args.get("file_text", "")
-                args["command"] = "str_replace"
-                args["original"] = ""  # Replace the entire content
-                args["replacement"] = file_text
-                command.function.arguments = json.dumps(args)
-                logger.info(f"Modified command from 'create' to 'str_replace' for existing file: {target_path}")
-                # Continue with the modified command
+                try:
+                    with open(target_path, 'w') as f:
+                        f.write(file_text)
+                    logger.info(f"Successfully wrote content to existing file: {target_path}")
+                    return f"Observed output of cmd `str_replace_editor` executed:\nFile updated successfully at: {path_str}"
+                except Exception as e:
+                    logger.error(f"Failed to write to file {target_path}: {e}")
+                    return f"Error: Failed to write to file {path_str}. {str(e)}"
 
             # Execute original command via base class
             result_str = await super().execute_tool(command)
