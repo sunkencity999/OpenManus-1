@@ -129,6 +129,26 @@ class TaskCompleter(BaseModel):
                 "platform", "purpose", "tone", "key_message", 
                 "hashtags", "call_to_action"
             ]
+        elif "website" in task_lower or "web site" in task_lower or "webpage" in task_lower:
+            self.task_type = "website"
+            self.task_requirements = [
+                "website_name", "website_url", "color_scheme", "folder_name",
+                "purpose", "target_audience"
+            ]
+            
+            # Extract website name and URL from task description if possible
+            import re
+            website_name_match = re.search(r'called ["\']?([\w\s]+)["\']', task_lower)
+            if website_name_match:
+                self.add_information("website_name", website_name_match.group(1).strip())
+                
+            url_match = re.search(r'url\s+(?:is\s+)?["\']?(https?://[\w\.-]+\.[a-zA-Z]{2,})["\']?', task_lower)
+            if url_match:
+                self.add_information("website_url", url_match.group(1).strip())
+                
+            folder_match = re.search(r'(?:folder|directory)\s+(?:called\s+)?["\']?([\w\s-]+)["\']', task_lower)
+            if folder_match:
+                self.add_information("folder_name", folder_match.group(1).strip())
         else:
             # Generic research task
             self.task_type = "research"
@@ -298,6 +318,8 @@ class TaskCompleter(BaseModel):
             return self._create_email_content()
         elif self.task_type == "social_media":
             return self._create_social_media_content()
+        elif self.task_type == "website":
+            return self._create_website()
         else:  # Default to research report
             return self._create_research_report()
     

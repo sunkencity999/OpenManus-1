@@ -473,20 +473,43 @@ class ImprovedManus(ToolCallAgent):
                     "provide", "overview", "structure", "details", "specifics", "requirements"
                 ]
                 
-                # Force asking the question if it contains important keywords
-                force_ask = any(keyword in question.lower() for keyword in important_keywords)
+                # Check if the question is a duplicate or semantically similar to recently asked questions
+                question_norm = question.strip().lower()
+                duplicate_or_similar = False
                 
-                # Record the question in the tool tracker - but only if we're not forcing it
-                # This prevents the question from being marked as asked if we're forcing it
-                if not force_ask:
+                # First check for exact duplicates
+                for prev_q in self.tool_tracker.asked_questions[-10:]:  # Check the last 10 questions
+                    prev_norm = prev_q.strip().lower()
+                    if question_norm == prev_norm:
+                        logger.warning(f"Exact duplicate question detected: {question}")
+                        duplicate_or_similar = True
+                        break
+                
+                # If not an exact duplicate, check for semantic similarity
+                if not duplicate_or_similar:
+                    for prev_q in self.tool_tracker.asked_questions[-10:]:
+                        similarity = self._calculate_similarity(question, prev_q)
+                        if similarity > 0.7:  # High similarity threshold
+                            logger.warning(f"Similar question detected (similarity: {similarity:.2f}): {question} vs {prev_q}")
+                            duplicate_or_similar = True
+                            break
+                
+                # Force asking the question if it contains important keywords AND is not a duplicate/similar
+                force_ask = any(keyword in question.lower() for keyword in important_keywords) and not duplicate_or_similar
+                
+                # Check for redundancy
+                is_redundant = self._is_redundant_question(question)
+                
+                # Record the question in the tool tracker if we're going to ask it
+                if not is_redundant or force_ask:
                     self.tool_tracker.record_question(question)
                 
-                # Only check for redundancy if not forcing the question
-                if not force_ask and self._is_redundant_question(question):
+                # Skip redundant questions unless we're forcing them
+                if is_redundant and not force_ask:
                     # Check if we've been asking the same question repeatedly
                     # If so, we should just ask it anyway to break the loop
-                    repeated_count = sum(1 for q in self.tool_tracker.asked_questions 
-                                      if self._calculate_similarity(q, question) > 0.8)
+                    repeated_count = sum(1 for q in self.tool_tracker.asked_questions[-10:] 
+                                       if self._calculate_similarity(q, question) > 0.8)
                     
                     if repeated_count >= 3:
                         logger.warning(f"Question '{question}' has been filtered multiple times. Forcing it to break potential loop.")
@@ -1880,50 +1903,42 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         if not self._prevent_repeated_questions:
             return False
             
-        # Always allow questions with certain keywords that indicate they're important
-        important_keywords = [
-            "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
-            "decide", "opinion", "want", "need", "should", "would you", "do you", "can you",
-            "provide", "overview", "structure", "details", "specifics", "requirements"
-        ]
-        
-        # Check if the question contains any important keywords
-        if any(keyword in question.lower() for keyword in important_keywords):
-            logger.info(f"🔑 Allowing important question with key terms: {question}")
-            return False
-            
         question_norm = question.strip().lower()
         
-        # Only consider exact matches as redundant
+        # First check for exact matches (highest priority)
         for prev_question in self.tool_tracker.asked_questions:
             prev_norm = prev_question.strip().lower()
             if question_norm == prev_norm:
                 logger.warning(f"🔄 Avoiding exactly repeated question: {question}")
                 return True
                 
-        # For non-exact matches, use a more lenient approach
-        try:
-            # Check for very high similarity (only if nearly identical)
-            if self.conversation_memory.is_similar_question(question_norm) and len(self.tool_tracker.asked_questions) > 5:
+        # Check for semantic similarity with recent questions
+        # Only check the last 10 questions to avoid false positives with older questions
+        recent_questions = self.tool_tracker.asked_questions[-10:] if len(self.tool_tracker.asked_questions) > 10 else self.tool_tracker.asked_questions
+        
+        for prev_question in recent_questions:
+            # Calculate similarity
+            similarity = self._calculate_similarity(question, prev_question)
+            
+            # If very similar (80%+ overlap), consider it redundant
+            if similarity > 0.8:
+                logger.warning(f"🔄 Avoiding similar question (similarity: {similarity:.2f}): {question}")
+                return True
+                
+            # For moderately similar questions (60-80% overlap), check if they have the same intent
+            if similarity > 0.6:
                 # Extract question words (what, who, when, where, why, how)
                 q_words_pattern = r'\b(what|who|when|where|why|how)\b'
                 import re
-                q_words = set(re.findall(q_words_pattern, question_norm))
+                q_words_question = set(re.findall(q_words_pattern, question_norm))
+                q_words_prev = set(re.findall(q_words_pattern, prev_norm))
                 
-                # Only consider it redundant if we've asked many questions and this one is very similar
-                # But even then, allow different question types (what vs how, etc.)
-                for prev_question in self.tool_tracker.asked_questions:
-                    prev_q_words = set(re.findall(q_words_pattern, prev_question.lower()))
-                    if q_words and prev_q_words and q_words != prev_q_words:
-                        # Different question type, allow it
-                        return False
-                        
-                logger.warning(f"🔄 Avoiding redundant question (memory similarity): {question}")
-                return True
-        except Exception as e:
-            logger.error(f"Error checking memory for similar question: {e}")
-
-        # Default to allowing the question if we're not sure
+                # If they have the same question words, they likely have the same intent
+                if q_words_question and q_words_prev and q_words_question == q_words_prev:
+                    logger.warning(f"🔄 Avoiding question with same intent: {question}")
+                    return True
+                    
+        # If we get here, the question is not redundant
         return False
 
     def _get_most_relevant_url(self, query: str) -> Optional[str]:
@@ -2278,7 +2293,7 @@ except Exception as e:
                 "args": {"action": "go_to_url", "url": urls[0]},
             }
 
-        # 3. Research/Information -> perform_web_research
+        # 3. Research/Information -> browser_use for web research
         research_keywords = [
             "what is",
             "who is",
@@ -2293,14 +2308,31 @@ except Exception as e:
             "find info on",
             "news on",
             "statistics for",
+            "example of",
+            "template for",
+            "design for",
+            "layout for",
+            "modern",
+            "best practice"
         ]
         if (
-            q_lower.endswith("?")
+            (q_lower.endswith("?") or "what" in q_lower or "how" in q_lower)
             and len(question) > 15
             and any(kw in q_lower for kw in research_keywords)
         ):
-            logger.info("Suggestion: Use perform_web_research.")
-            return {"tool": "perform_web_research", "args": {"query": question}}
+            # Extract key search terms from the question
+            search_query = question.replace("?", "").strip()
+            # For certain types of questions, create a more specific search query
+            if "example" in q_lower or "template" in q_lower or "design" in q_lower or "layout" in q_lower:
+                search_query = f"examples of {search_query}"
+            
+            # Use browser_use with a search URL
+            search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
+            logger.info(f"Research question detected, using browser_use to search: {search_query}")
+            return {
+                "tool": "browser_use",
+                "args": {"action": "go_to_url", "url": search_url},
+            }
 
         # 4. File Operations -> str_replace_editor or python_execute
         file_keywords = [

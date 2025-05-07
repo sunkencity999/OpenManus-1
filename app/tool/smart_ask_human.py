@@ -56,17 +56,47 @@ class SmartAskHuman(BaseTool):
         force_ask = False
         important_keywords = [
             "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
-            "decide", "opinion", "want", "need", "should", "would you", "do you", "can you"
+            "decide", "opinion", "want", "need", "should", "would you", "do you", "can you",
+            "provide", "overview", "structure", "details", "specifics", "requirements"
         ]
         
         # Check if the question contains any important keywords
         if any(keyword in inquire.lower() for keyword in important_keywords):
-            force_ask = True
+            # Check if this question is similar to previously asked questions
+            # Even important questions shouldn't be asked multiple times with similar wording
+            if self._context_manager and hasattr(self._context_manager, 'asked_questions'):
+                normalized_question = inquire.strip().lower()
+                
+                # Check for exact duplicates first
+                if any(q.strip().lower() == normalized_question for q in self._context_manager.asked_questions[-10:]):
+                    print(f"Exact duplicate question detected in SmartAskHuman: {inquire}")
+                    force_ask = False  # Don't force if it's an exact duplicate of a recent question
+                    
+                # Check for semantic similarity if we have a calculate_similarity method
+                elif hasattr(self._context_manager, '_calculate_similarity') and len(self._context_manager.asked_questions) > 0:
+                    # Check similarity with recent questions
+                    for prev_q in self._context_manager.asked_questions[-10:]:
+                        try:
+                            similarity = self._context_manager._calculate_similarity(inquire, prev_q)
+                            if similarity > 0.7:  # High similarity threshold
+                                print(f"Similar question detected in SmartAskHuman (similarity: {similarity:.2f}): {inquire} vs {prev_q}")
+                                force_ask = False
+                                break
+                        except Exception as e:
+                            print(f"Error calculating similarity: {e}")
+                    else:  # No similar questions found
+                        force_ask = True
+                else:
+                    force_ask = True
+            else:
+                force_ask = True
         
         # If we have a context manager, check if we should skip this question
         if self._context_manager:
-            # Use a generic context key based on the question
-            context_key = f"user_response_{hash(inquire) % 10000}"
+            # Use a more specific context key based on the normalized question
+            # This helps prevent hash collisions and makes retrieval more reliable
+            normalized_q = inquire.strip().lower()
+            context_key = f"user_response_{hash(normalized_q) % 100000}"
             
             # Check if we already have this information and it's not a forced question
             existing = self._context_manager.get_context(context_key)

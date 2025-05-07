@@ -363,3 +363,141 @@ def _create_social_media_content(self) -> str:
     
     self.logger.warning(f"📝 Created social media content deliverable ({len(deliverable)} chars)")
     return deliverable
+
+def _create_website(self) -> str:
+    """Create a website deliverable with HTML, CSS, and JavaScript files."""
+    # Get website information from gathered info
+    website_name = self.gathered_info.get("website_name", self._extract_product_name())
+    website_url = self.gathered_info.get("website_url", "")
+    color_scheme = self.gathered_info.get("color_scheme", "modern and minimalist")
+    
+    # Handle folder name based on user preference or generate automatically
+    if "folder_name" in self.gathered_info and self.gathered_info["folder_name"]:
+        # Use the user-specified folder name
+        folder_name = self.gathered_info["folder_name"]
+    else:
+        # Generate a folder name based on the website name
+        # Convert to lowercase, replace spaces with underscores, and remove special characters
+        import re
+        folder_name = re.sub(r'[^\w\s-]', '', website_name.lower())
+        folder_name = re.sub(r'[\s]+', '_', folder_name)
+        
+        # If folder name is still empty, use a generic name
+        if not folder_name:
+            folder_name = "website_project"
+    
+    # Determine colors based on color scheme
+    colors = {
+        "background": "#ffffff",
+        "text": "#333333",
+        "primary": "#4a6fa5",
+        "secondary": "#e9ecef",
+        "accent": "#28a745"
+    }
+    
+    if "dark" in color_scheme.lower():
+        colors = {
+            "background": "#121212",
+            "text": "#e0e0e0",
+            "primary": "#4a6fa5",
+            "secondary": "#2d2d2d",
+            "accent": "#28a745"
+        }
+    
+    # Create folder structure
+    import os
+    from pathlib import Path
+    
+    # Create base directory
+    base_dir = Path(os.getcwd()) / folder_name
+    os.makedirs(base_dir, exist_ok=True)
+    
+    # Create subdirectories
+    for subdir in ["css", "js", "images"]:
+        os.makedirs(base_dir / subdir, exist_ok=True)
+    
+    # Create HTML files for each page
+    pages = ["index", "projects", "services", "contact"]
+    
+    # Create CSS file
+    css_content = f"""/* Styles for {website_name} */
+* {{\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}}\n\nbody {{\n  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n  line-height: 1.6;\n  color: {colors['text']};\n  background-color: {colors['background']};\n}}\n\nheader {{\n  background-color: {colors['primary']};\n  color: white;\n  padding: 1rem;\n  text-align: center;\n}}\n\nnav {{\n  display: flex;\n  justify-content: center;\n  background-color: {colors['secondary']};\n  padding: 1rem;\n}}\n\nnav a {{\n  color: {colors['text']};\n  text-decoration: none;\n  padding: 0.5rem 1rem;\n  margin: 0 0.5rem;\n  border-radius: 4px;\n  transition: background-color 0.3s;\n}}\n\nnav a:hover {{\n  background-color: {colors['primary']};\n  color: white;\n}}\n\n.container {{\n  max-width: 1200px;\n  margin: 0 auto;\n  padding: 2rem;\n}}\n\n.hero {{\n  text-align: center;\n  padding: 3rem 0;\n}}\n\n.hero h1 {{\n  font-size: 2.5rem;\n  margin-bottom: 1rem;\n}}\n\n.hero p {{\n  font-size: 1.2rem;\n  max-width: 800px;\n  margin: 0 auto;\n}}\n\n.btn {{\n  display: inline-block;\n  background-color: {colors['accent']};\n  color: white;\n  padding: 0.5rem 1rem;\n  border-radius: 4px;\n  text-decoration: none;\n  margin-top: 1rem;\n}}\n\n.btn:hover {{\n  opacity: 0.9;\n}}\n\n.features {{\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));\n  gap: 2rem;\n  margin: 2rem 0;\n}}\n\n.feature {{\n  padding: 1.5rem;\n  border-radius: 8px;\n  background-color: {colors['secondary']};\n  text-align: center;\n}}\n\nfooter {{\n  background-color: {colors['primary']};\n  color: white;\n  text-align: center;\n  padding: 1rem;\n  margin-top: 2rem;\n}}\n\n/* Responsive design */\n@media (max-width: 768px) {{\n  nav {{\n    flex-direction: column;\n  }}\n  \n  nav a {{\n    margin: 0.2rem 0;\n  }}\n  \n  .features {{\n    grid-template-columns: 1fr;\n  }}\n}}\n"""
+    
+    with open(base_dir / "css" / "style.css", "w") as f:
+        f.write(css_content)
+    
+    # Create JavaScript file
+    js_content = """// JavaScript for website functionality
+document.addEventListener('DOMContentLoaded', function() {
+  // Mobile menu toggle
+  const navToggle = document.querySelector('.nav-toggle');
+  const navMenu = document.querySelector('nav');
+  
+  if (navToggle) {
+    navToggle.addEventListener('click', function() {
+      navMenu.classList.toggle('active');
+    });
+  }
+  
+  // Form validation for contact page
+  const contactForm = document.getElementById('contact-form');
+  
+  if (contactForm) {
+    contactForm.addEventListener('submit', function(event) {
+      event.preventDefault();
+      
+      const name = document.getElementById('name').value;
+      const email = document.getElementById('email').value;
+      const message = document.getElementById('message').value;
+      
+      if (!name || !email || !message) {
+        alert('Please fill in all fields');
+        return;
+      }
+      
+      // Simulate form submission
+      alert('Thank you for your message! We will get back to you soon.');
+      contactForm.reset();
+    });
+  }
+});
+"""
+    
+    with open(base_dir / "js" / "main.js", "w") as f:
+        f.write(js_content)
+    
+    # Create HTML files
+    for page in pages:
+        page_title = page.capitalize()
+        if page == "index":
+            page_title = "Home"
+        
+        content = ""
+        
+        if page == "index":
+            content = f"""<div class="hero">\n  <h1>Welcome to {website_name}</h1>\n  <p>A modern and clean website with beautiful typography for a software development and media firm based in the Santa Cruz mountains.</p>\n  <a href="services.html" class="btn">Our Services</a>\n</div>\n\n<div class="features">\n  <div class="feature">\n    <h2>Professional Photography</h2>\n    <p>High-quality photography services for all your needs.</p>\n  </div>\n  <div class="feature">\n    <h2>Creative Writing</h2>\n    <p>Engaging content that captures your audience's attention.</p>\n  </div>\n  <div class="feature">\n    <h2>Videography</h2>\n    <p>Professional video production for various purposes.</p>\n  </div>\n</div>"""
+        elif page == "projects":
+            content = f"""<h1>Our Projects</h1>\n<p>Here are some of our recent projects:</p>\n\n<div class="features">\n  <div class="feature">\n    <h2>Project 1</h2>\n    <p>A software solution for local businesses.</p>\n  </div>\n  <div class="feature">\n    <h2>Project 2</h2>\n    <p>Custom website development for a non-profit organization.</p>\n  </div>\n  <div class="feature">\n    <h2>Project 3</h2>\n    <p>Photography and videography for a marketing campaign.</p>\n  </div>\n</div>"""
+        elif page == "services":
+            content = f"""<h1>Our Services</h1>\n<p>We offer a range of professional services:</p>\n\n<div class="features">\n  <div class="feature">\n    <h2>Software Development</h2>\n    <p>Custom software solutions that solve real problems for real people.</p>\n  </div>\n  <div class="feature">\n    <h2>Professional Photography</h2>\n    <p>High-quality photography for various purposes.</p>\n  </div>\n  <div class="feature">\n    <h2>Content Writing</h2>\n    <p>Engaging and informative content for your website or marketing materials.</p>\n  </div>\n  <div class="feature">\n    <h2>Videography</h2>\n    <p>Professional video production for various purposes.</p>\n  </div>\n</div>"""
+        elif page == "contact":
+            content = f"""<h1>Contact Us</h1>\n<p>Get in touch with us:</p>\n\n<form id="contact-form">\n  <div class="form-group">\n    <label for="name">Name</label>\n    <input type="text" id="name" name="name" required>\n  </div>\n  <div class="form-group">\n    <label for="email">Email</label>\n    <input type="email" id="email" name="email" required>\n  </div>\n  <div class="form-group">\n    <label for="message">Message</label>\n    <textarea id="message" name="message" rows="5" required></textarea>\n  </div>\n  <button type="submit" class="btn">Send Message</button>\n</form>\n\n<div class="contact-info">\n  <h2>Our Location</h2>\n  <p>Santa Cruz Mountains, California</p>\n  <h2>Email</h2>\n  <p>info@{website_url.replace('https://', '') if website_url else 'example.com'}</p>\n</div>"""
+        
+        html_content = f"""<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>{website_name} - {page_title}</title>\n  <link rel="stylesheet" href="css/style.css">\n</head>\n<body>\n  <header>\n    <h1>{website_name}</h1>\n    <button class="nav-toggle">Menu</button>\n  </header>\n  \n  <nav>\n    <a href="index.html">Home</a>\n    <a href="projects.html">Projects</a>\n    <a href="services.html">Services</a>\n    <a href="contact.html">Contact</a>\n  </nav>\n  \n  <div class="container">\n    {content}\n  </div>\n  \n  <footer>\n    <p>&copy; {website_name} {self.gathered_info.get('year', '2025')}. All rights reserved.</p>\n  </footer>\n  \n  <script src="js/main.js"></script>\n</body>\n</html>"""
+        
+        file_name = f"{page}.html"
+        with open(base_dir / file_name, "w") as f:
+            f.write(html_content)
+    
+    # Create a README file
+    readme_content = f"""# {website_name}\n\nA modern and clean website with beautiful typography.\n\n## Pages\n\n- Home: Introduction to the company\n- Projects: Showcase of recent projects\n- Services: Details of services offered\n- Contact: Contact form and information\n\n## Technologies Used\n\n- HTML5\n- CSS3\n- JavaScript\n\n## How to Use\n\n1. Clone this repository\n2. Open index.html in your browser\n\n## License\n\nAll rights reserved.\n"""
+    
+    with open(base_dir / "README.md", "w") as f:
+        f.write(readme_content)
+    
+    # Create a summary of what was created
+    deliverable = f"""# Website: {website_name}\n\n## Files Created\n\n- HTML: index.html, projects.html, services.html, contact.html\n- CSS: css/style.css\n- JavaScript: js/main.js\n- README.md\n\n## Structure\n\n```\n{folder_name}/\n├── css/\n│   └── style.css\n├── js/\n│   └── main.js\n├── images/\n├── index.html\n├── projects.html\n├── services.html\n├── contact.html\n└── README.md\n```\n\n## Design\n\n- Color Scheme: {color_scheme}\n- Typography: Modern sans-serif fonts\n- Responsive: Yes, works on mobile and desktop\n\n## Features\n\n- Clean, modern design\n- Responsive navigation\n- Contact form with validation\n- Showcase of services and projects\n\nThe website has been created in the '{folder_name}' directory.\n"""
+    
+    self.deliverable_content = deliverable
+    self.logger.warning(f"📝 Created website deliverable in folder '{folder_name}'")
+    return deliverable
