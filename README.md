@@ -26,6 +26,9 @@ LocalManus is a fork of the OpenManus project that enhances the reasoning capabi
 - **Reduced Redundant Questioning**: Tracks previous questions to avoid repetition
 - **File Handling**: Automatically detects file paths and saves content to requested files
 - **Specialized Content Creation**: Support for marketing plans, poems, research reports, and more
+- **Local LLM Integration**: Seamless integration with Ollama for fully local AI processing
+- **Web Content Analysis**: Extract, analyze, and save web content using local LLM capabilities
+- **Privacy-Focused**: All data processing happens locally, with no external API calls
 
 *Based on the original OpenManus project by [@Xinbin Liang](https://github.com/mannaandpoem), [@Jinyu Xiang](https://github.com/XiangJinyu), and team.*
 
@@ -113,22 +116,38 @@ cp config/config.example.toml config/config.toml
 ```toml
 # Global LLM configuration
 [llm]
-model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-..."  # Replace with your actual API key
+model = "llama3.2:latest"  # Default Ollama model
+base_url = "http://localhost:11434"  # Ollama API endpoint
 max_tokens = 4096
 temperature = 0.0
 
 # Optional configuration for specific LLM models
 [llm.vision]
-model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-..."  # Replace with your actual API key
+model = "llama3.2:latest"  # For vision capabilities (if supported)
+base_url = "http://localhost:11434"
 ```
 
 ## LocalManus Installation
 
-LocalManus provides easy installation scripts for all major platforms that will set up the complete environment, including Ollama and the default model.
+LocalManus provides easy installation scripts for all major platforms that will set up the complete environment, including Ollama and the default model. The system is designed to work entirely locally, using Ollama for LLM functionality instead of external API calls.
+
+### Ollama Integration
+
+LocalManus uses [Ollama](https://ollama.ai/) to run large language models locally on your device. This provides several benefits:
+
+- **Privacy**: All data processing happens on your local machine
+- **No API Costs**: No usage fees or API keys required
+- **Offline Operation**: Works without an internet connection once models are downloaded
+- **Customization**: Easy to switch between different open-source models
+
+### Web Content Analysis
+
+LocalManus includes a powerful browser tool with integrated Ollama analysis capabilities:
+
+- **Content Extraction**: Extract content from any webpage
+- **Intelligent Analysis**: Analyze web content based on specific goals using Ollama
+- **Multiple Output Formats**: Save analyses in markdown, JSON, HTML, or text formats
+- **Automatic Organization**: Content is saved with metadata for easy reference
 
 ### One-Click Installation
 

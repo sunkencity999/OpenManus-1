@@ -58,6 +58,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                     "web_search",
                     "wait",
                     "extract_content",
+                    "extract_analyze_save",
                     "switch_tab",
                     "open_tab",
                     "close_tab",
@@ -90,7 +91,16 @@ class BrowserUseTool(BaseTool, Generic[Context]):
             },
             "goal": {
                 "type": "string",
-                "description": "Extraction goal for 'extract_content' action",
+                "description": "Extraction goal for 'extract_content' or 'extract_analyze_save' actions",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Filename to save the analysis to for 'extract_analyze_save' action",
+            },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "json", "html", "text"],
+                "description": "Format of the output file for 'extract_analyze_save' action",
             },
             "keys": {
                 "type": "string",
@@ -118,6 +128,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
             "web_search": ["query"],
             "wait": ["seconds"],
             "extract_content": ["goal"],
+            "extract_analyze_save": ["goal", "filename"],
         },
     }
 
@@ -463,6 +474,30 @@ Page content:
                         )
 
                     return ToolResult(output="No content was extracted from the page.")
+                    
+                elif action == "extract_analyze_save":
+                    if not goal:
+                        return ToolResult(
+                            error="Goal is required for 'extract_analyze_save' action"
+                        )
+                    
+                    # Get the filename from kwargs or generate a default one
+                    filename = kwargs.get("filename")
+                    if not filename:
+                        from datetime import datetime
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"analysis_{timestamp}.md"
+                    
+                    # Get the format from kwargs or default to markdown
+                    format = kwargs.get("format", "markdown")
+                    
+                    # Call the extract_analyze_save method
+                    result_path = await self.extract_analyze_save(context, goal, filename, format)
+                    
+                    if result_path:
+                        return ToolResult(output=f"Analysis saved to {result_path}")
+                    else:
+                        return ToolResult(error="Failed to extract, analyze, and save content")
 
                 # Tab management actions
                 elif action == "switch_tab":
@@ -580,6 +615,328 @@ Page content:
                 loop.run_until_complete(self.cleanup())
                 loop.close()
 
+    async def extract_analyze_save(self, context, goal, filename, format="markdown"):
+        """
+        Extract content from a webpage, analyze it using Ollama, and save the result to a file.
+        
+        Args:
+            context: The browser context
+            goal: The goal of the extraction (what to analyze)
+            filename: The filename to save the analysis to
+            format: The format of the output file (markdown, json, html, text)
+            
+        Returns:
+            The path to the saved file or None if extraction failed
+        """
+        import logging
+        import os
+        import time
+        import json
+        from datetime import datetime
+        
+        logger = logging.getLogger("browser_use_tool")
+        logger.info(f"Extracting and analyzing content with goal: {goal}")
+        
+        try:
+            # Get the current page
+            browser_context = await self._ensure_browser_initialized()
+            page = await browser_context.get_current_page()
+            
+            if not page:
+                logger.error("No active page found")
+                return None
+            
+            # Extract raw content
+            logger.info("Extracting raw content from page")
+            raw_html = await page.content()
+            page_url = page.url
+            page_title = await page.title()
+            
+            logger.info(f"Page title: {page_title}")
+            logger.info(f"Page URL: {page_url}")
+            logger.info(f"HTML content length: {len(raw_html)}")
+            
+            # Create workspace directory structure
+            workspace_dir = os.path.join(os.getcwd(), "workspace")
+            os.makedirs(workspace_dir, exist_ok=True)
+            
+            # Create a raw content directory
+            raw_content_dir = os.path.join(workspace_dir, "raw_content")
+            os.makedirs(raw_content_dir, exist_ok=True)
+            
+            # Generate a timestamp for the raw content file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create a directory for this specific extraction
+            extraction_dir = os.path.join(raw_content_dir, f"extraction_{timestamp}")
+            os.makedirs(extraction_dir, exist_ok=True)
+            
+            # Save the raw HTML
+            raw_html_path = os.path.join(extraction_dir, "raw.html")
+            with open(raw_html_path, 'w', encoding='utf-8') as f:
+                f.write(raw_html)
+            logger.info(f"Saved raw HTML content to {raw_html_path}")
+            
+            # Convert HTML to markdown for better readability
+            try:
+                import markdownify
+                content = markdownify.markdownify(raw_html)
+            except ImportError:
+                logger.warning("markdownify not installed, using raw HTML")
+                content = raw_html
+            
+            # Save the raw markdown
+            raw_md_path = os.path.join(extraction_dir, "raw.md")
+            with open(raw_md_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logger.info(f"Saved raw markdown content to {raw_md_path}")
+            
+            # Save metadata about the extraction
+            metadata = {
+                "url": page_url,
+                "title": page_title,
+                "timestamp": timestamp,
+                "goal": goal,
+                "extraction_time": datetime.now().isoformat()
+            }
+            
+            metadata_path = os.path.join(extraction_dir, "metadata.json")
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+            logger.info(f"Saved extraction metadata to {metadata_path}")
+            
+            # Analyze the content using Ollama
+            logger.info("Analyzing content using Ollama")
+            
+            # Get the maximum content length to analyze
+            max_content_length = 10000  # Reasonable default
+            
+            # Create a prompt for analysis
+            analysis_prompt = f"""
+            You are an expert content analyzer. Your task is to extract and summarize information from the following webpage content.
+            
+            GOAL: {goal}
+            
+            PAGE TITLE: {page_title}
+            PAGE URL: {page_url}
+            
+            Please provide a detailed analysis focusing specifically on this goal. Include all relevant information, facts, figures, and quotes.
+            Structure your response with appropriate headings and sections. Be comprehensive but concise.
+            
+            CONTENT:
+            {content[:max_content_length] if len(content) > max_content_length else content}
+            
+            {"[Content truncated due to length]" if len(content) > max_content_length else ""}
+            """
+            
+            # Get LLM config
+            if not self.llm:
+                logger.error("LLM not initialized")
+                return None
+                
+            model = self.llm.model
+            api_type = getattr(self.llm, 'api_type', 'ollama')
+            base_url = self.llm.base_url
+            
+            # Remove /v1 suffix for Ollama as per memory
+            original_base_url = base_url
+            if base_url and base_url.endswith("/v1"):
+                base_url = base_url[:-3]
+                self.llm.base_url = base_url  # Update the base_url in the LLM object
+                logger.info(f"Removed /v1 suffix from base_url: {original_base_url} -> {base_url}")
+            
+            # Get a response from Ollama
+            logger.info(f"Sending request to Ollama with model: {model}")
+            
+            # Try to get a response from Ollama
+            analysis_response = None
+            
+            try:
+                # Import the ollama_integration module if available
+                try:
+                    import ollama_integration
+                    logger.info("Using ollama_integration module")
+                    analysis_response = await ollama_integration.get_ollama_response(self.llm, analysis_prompt)
+                except ImportError:
+                    logger.warning("ollama_integration module not found, using direct API calls")
+                    
+                    # If ollama_integration is not available, use direct API calls
+                    import aiohttp
+                    timeout = aiohttp.ClientTimeout(total=300)  # 5 minutes timeout
+                    
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        # Prepare the request payload for the chat API
+                        payload = {
+                            "model": model,
+                            "messages": [{"role": "user", "content": analysis_prompt}],
+                            "stream": False
+                        }
+                        
+                        logger.info(f"Sending request to: {base_url}/api/chat")
+                        start_time = datetime.now()
+                        logger.info("Waiting for Ollama to generate response (this may take a while)...")
+                        
+                        async with session.post(f"{base_url}/api/chat", json=payload) as response:
+                            elapsed = (datetime.now() - start_time).total_seconds()
+                            logger.info(f"Received HTTP status: {response.status} after {elapsed:.2f} seconds")
+                            
+                            if response.status == 200:
+                                result = await response.json()
+                                logger.info(f"Received response from Ollama chat API with keys: {result.keys() if result else 'None'}")
+                                
+                                if "message" in result and "content" in result["message"]:
+                                    analysis_response = result["message"]["content"]
+                                    logger.info(f"Successfully extracted content from Ollama chat response, length: {len(analysis_response)}")
+                                else:
+                                    logger.warning(f"Unexpected response structure from Ollama chat API: {result.keys() if result else 'None'}")
+                                    
+                                    # Try fallback to generate API
+                                    logger.info("Falling back to Ollama generate API")
+                                    payload = {
+                                        "model": model,
+                                        "prompt": analysis_prompt,
+                                        "stream": False
+                                    }
+                                    
+                                    async with session.post(f"{base_url}/api/generate", json=payload) as gen_response:
+                                        if gen_response.status == 200:
+                                            gen_result = await gen_response.json()
+                                            if "response" in gen_result:
+                                                analysis_response = gen_result["response"]
+                                                logger.info(f"Successfully extracted content from Ollama generate response, length: {len(analysis_response)}")
+                            else:
+                                logger.error(f"Error from Ollama API: {response.status}")
+            
+            except Exception as e:
+                logger.error(f"Error during LLM analysis: {str(e)}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Check if we got a response
+            if not analysis_response:
+                logger.error("Failed to get a response from Ollama")
+                return None
+            
+            logger.info(f"Analysis response length: {len(analysis_response)}")
+            
+            # Save the raw analysis
+            analysis_path = os.path.join(extraction_dir, "analysis.md")
+            with open(analysis_path, 'w', encoding='utf-8') as f:
+                f.write(analysis_response)
+            logger.info(f"Saved raw analysis to {analysis_path}")
+            
+            # Format the analysis based on the requested format
+            logger.info(f"Formatting analysis in {format} format...")
+            
+            # Ensure filename has the correct extension based on format
+            file_extension = {
+                "json": ".json",
+                "html": ".html",
+                "text": ".txt",
+                "markdown": ".md"
+            }.get(format, ".md")
+            
+            if not filename.endswith(file_extension):
+                filename = filename + file_extension
+            
+            # Format the content based on the requested format
+            if format == "json":
+                # Create a JSON structure with the analysis and metadata
+                formatted_data = {
+                    "goal": goal,
+                    "url": page_url,
+                    "title": page_title,
+                    "analysis": analysis_response,
+                    "metadata": {
+                        "extraction_time": datetime.now().isoformat(),
+                        "source": page_url,
+                        "raw_content_path": extraction_dir
+                    }
+                }
+                formatted_content = json.dumps(formatted_data, indent=2)
+                
+            elif format == "html":
+                # Create a nicely formatted HTML document
+                formatted_content = f"""<!DOCTYPE html>
+                <html>
+                <head>
+                    <title>{goal} - {page_title}</title>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <style>
+                        body {{ font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; max-width: 800px; margin: 0 auto; }}
+                        h1 {{ color: #333; }}
+                        .content {{ margin: 20px 0; }}
+                        .source {{ color: #666; font-style: italic; }}
+                        .extraction-info {{ margin-top: 30px; padding-top: 10px; border-top: 1px solid #eee; font-size: 0.8em; color: #999; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>{goal}</h1>
+                    <h2>{page_title}</h2>
+                    <div class="content">
+                        {analysis_response}
+                    </div>
+                    <p class="source">Source: <a href="{page_url}">{page_url}</a></p>
+                    <div class="extraction-info">
+                        Extraction time: {datetime.now().isoformat()}<br>
+                        Raw content available at: {extraction_dir}
+                    </div>
+                </body>
+                </html>"""
+                
+            elif format == "text":
+                # Create a simple text format
+                formatted_content = f"""GOAL: {goal}
+
+TITLE: {page_title}
+
+SOURCE: {page_url}
+
+{analysis_response}
+
+Extraction time: {datetime.now().isoformat()}
+Raw content available at: {extraction_dir}
+"""
+                
+            else:  # Default to markdown
+                # Create a nicely formatted markdown document
+                formatted_content = f"""# {goal}
+
+## {page_title}
+
+{analysis_response}
+
+---
+
+*Source: [{page_url}]({page_url})*
+
+*Extraction time: {datetime.now().isoformat()}*
+
+*Raw content available at: `{extraction_dir}`*
+"""
+            
+            # Write the formatted content to the output file
+            output_path = os.path.join(workspace_dir, filename)
+            
+            # Create the directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Write the content to the file
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(formatted_content)
+            
+            logger.info(f"Saved formatted content to {output_path}")
+            
+            # Return the path to the saved file
+            return output_path
+        
+        except Exception as e:
+            logger.error(f"Error during extraction and analysis: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+    
     @classmethod
     def create_with_context(cls, context: Context) -> "BrowserUseTool[Context]":
         """Factory method to create a BrowserUseTool with a specific context."""
