@@ -174,11 +174,31 @@ class BaseAgent(BaseModel, ABC):
                 self.state = AgentState.IDLE
                 results.append(f"Terminated: Reached max steps ({self.max_steps})")
                 
-                # Add the final response if task was completed
+                # If we reached max steps but have a completed task, show the deliverable
                 if hasattr(self, 'task_completed') and self.task_completed and hasattr(self, 'task_completer'):
                     results.append(f"Final deliverable:\n{self.task_completer.deliverable_content}")
                     self.update_memory("assistant", self.task_completer.deliverable_content)
-        await SANDBOX_CLIENT.cleanup()
+                    
+                    # Reset for next task
+                    self.current_step = 0
+                    self.state = AgentState.IDLE
+                    
+                    # Add prompt for next task
+                    next_task_prompt = "\n\nTask completed! What would you like me to help you with next?"
+                    self.update_memory("assistant", next_task_prompt)
+                    results.append(next_task_prompt)
+                    
+                    # Reset task completion state
+                    if hasattr(self, 'current_task'):
+                        self.current_task = ""
+                    self.task_completed = False
+                    if hasattr(self, 'task_completer'):
+                        self.task_completer = None
+        
+        # Only cleanup if we're actually shutting down
+        if self.state == AgentState.FINISHED or self.current_step >= self.max_steps:
+            await SANDBOX_CLIENT.cleanup()
+            
         return "\n".join(results) if results else "No steps executed"
 
     @abstractmethod

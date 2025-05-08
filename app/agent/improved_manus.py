@@ -807,11 +807,42 @@ class ImprovedManus(ToolCallAgent):
                         source="browser",
                         tags=["web_content", "visited_url", url],
                     )
-                    # Process for task relevance
+                    
+                    # Process for task relevance - enhanced for creative tasks
+                    if self.task_completer and hasattr(self.task_completer, 'task_type'):
+                        task_type = self.task_completer.task_type or ""
+                        if task_type.lower() in ["poem", "story", "creative"]:
+                            logger.info(f"Processing content for creative task: {task_type}")
+                            # Extract key facts and details
+                            key_facts = []
+                            soup = BeautifulSoup(extracted_content, 'html.parser')
+                            
+                            # Extract title if available
+                            title = soup.title.string if soup.title else ""
+                            if title and len(title) < 150:  # Reasonable title length
+                                key_facts.append(f"Title: {title.strip()}")
+                            
+                            # Extract key sections
+                            section_headers = ["early life", "biography", "achievements", "legacy", "personal life"]
+                            for header in section_headers:
+                                section = self._extract_section(extracted_content, header)
+                                if section and len(section) > 50:  # Only include meaningful sections
+                                    key_facts.append(f"{header.title()}: {section}")
+                            
+                            # Extract important dates
+                            years = re.findall(r'\b(?:19|20)\d{2}\b', extracted_content)
+                            if years:
+                                key_facts.append(f"Key years: {', '.join(sorted(set(years)))}")
+                            
+                            # Add to task completer if we found useful information
+                            if key_facts:
+                                facts_text = "\n".join(key_facts)
+                                self.task_completer.add_information("key_facts", facts_text)
+                                logger.info(f"Extracted {len(key_facts)} key facts for creative content")
+                    
+                    # Process for general task relevance
                     self._process_content_for_task(url, extracted_content)
-                    final_content = (
-                        extracted_content  # Use extracted content for observation
-                    )
+                    final_content = extracted_content  # Use extracted content for observation
 
                 else:  # Handle cases where extraction failed or yielded little
                     logger.warning(f"No meaningful content extracted from {url}.")
@@ -859,10 +890,124 @@ class ImprovedManus(ToolCallAgent):
             )
             return f"Error: Browser action `{action}` failed: {str(e)}"
 
+    async def enhanced_web_research(
+        self, 
+        query: str, 
+        max_sites: int = 3,
+        min_content_length: int = 500,
+        max_content_length: int = 10000
+    ) -> Dict[str, Any]:
+        """
+        Enhanced web research with better content processing and storage.
+        
+        Args:
+            query: The search query
+            max_sites: Maximum number of sites to visit
+            min_content_length: Minimum content length to consider
+            max_content_length: Maximum content length to process
+            
+        Returns:
+            Dict containing research results and metadata
+        """
+        logger.info(f"🔍 Starting enhanced web research for: {query}")
+        research_results = {
+            'query': query,
+            'sources': [],
+            'total_content_length': 0,
+            'start_time': time.time(),
+            'status': 'in_progress'
+        }
+        
+        try:
+            # Step 1: Perform initial search
+            logger.info(f"🔎 Searching for: {query}")
+            search_results = await self.perform_web_research(query, max_sites)
+            
+            if not search_results or 'sources' not in search_results:
+                research_results['status'] = 'no_results'
+                logger.warning("No search results found")
+                return research_results
+            
+            # Step 2: Process each search result
+            for i, source in enumerate(search_results['sources'][:max_sites], 1):
+                try:
+                    url = source.get('url', '')
+                    if not url or url in [s.get('url') for s in research_results['sources']]:
+                        continue
+                        
+                    logger.info(f"🌐 Visiting source {i}/{min(max_sites, len(search_results['sources']))}: {url}")
+                    
+                    # Navigate to the URL
+                    await self.execute_browser_use("go_to_url", url=url)
+                    await asyncio.sleep(2)  # Allow page to load
+                    
+                    # Extract content
+                    browser_tool = self.available_tools.get_tool("browser_use")
+                    if not browser_tool:
+                        continue
+                        
+                    # Get page content
+                    content_result = await browser_tool.extract_content("Extract the main article or content body")
+                    if not content_result or not content_result.output:
+                        logger.warning(f"No content extracted from {url}")
+                        continue
+                        
+                    content = content_result.output
+                    content_length = len(content)
+                    
+                    # Skip if content is too short or too long
+                    if content_length < min_content_length:
+                        logger.info(f"Skipping {url} - content too short: {content_length} chars")
+                        continue
+                        
+                    if content_length > max_content_length:
+                        content = content[:max_content_length]
+                        logger.info(f"Truncated content from {url} to {max_content_length} chars")
+                    
+                    # Use browser_use tool with web_search action
+                    search_result = await self.execute_browser_use(
+                        action="web_search",
+                        query=query
+                    )
+                    
+                    # Process for task relevance
+                    if self.task_completer:
+                        self._process_content_for_task(url, content)
+                    
+                    # Add to context memory
+                    self.add_to_context(
+                        f"Content from {url} (truncated):\n{content[:1000]}...",
+                        source="web_research",
+                        tags=["web_content", "research", url]
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Error processing {url}: {str(e)}", exc_info=True)
+                    continue
+            
+            research_results['status'] = 'completed'
+            research_results['end_time'] = time.time()
+            research_results['duration'] = research_results['end_time'] - research_results['start_time']
+            
+            logger.info(f"✅ Research completed. Processed {len(research_results['sources'])} sources, "
+                       f"total {research_results['total_content_length']} characters")
+            
+            return research_results
+            
+        except Exception as e:
+            research_results['status'] = 'error'
+            research_results['error'] = str(e)
+            logger.error(f"Error in enhanced_web_research: {str(e)}", exc_info=True)
+            return research_results
+
     async def perform_web_research(
         self, query: str, max_sites: int = 4
-    ) -> str:  # Reduced max_sites further
-        """Perform web research: Search (DDG HTML) -> Extract URLs -> Visit -> Extract Content -> Analyze."""
+    ) -> Dict[str, Any]:
+        """Perform web research: Search (DDG HTML) -> Extract URLs -> Visit -> Extract Content -> Analyze.
+        
+        Returns:
+            Dict containing search results and sources
+        """
         urls_to_visit = []
         search_engine_url = ""
         logger.info(f"🔬 Starting web research for query: '{query}'")
@@ -2023,14 +2168,22 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             target_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Check for creative content generation before file operations
-            if editor_command == "create" and file_text and self._is_creative_content_description(file_text):
+            is_creative_content = editor_command == "create" and file_text and self._is_creative_content_description(file_text)
+            if is_creative_content:
+                logger.info(f"Detected creative content request: {file_text[:100]}...")
                 generated_content = await self._generate_creative_content(file_text)
                 if generated_content:
                     # Update the file_text with generated content
                     file_text = generated_content
                     args["file_text"] = file_text
                     command.function.arguments = json.dumps(args)
-                    logger.info(f"Generated creative content for: {file_text[:100]}...")
+                    logger.info(f"Successfully generated creative content")
+                    
+                    # Update task completer if available
+                    if self.task_completer and not self.task_completed:
+                        self.task_completer.add_information("content_generated", True)
+                        self.task_completer.add_information("generated_content", file_text)
+                        logger.info("Updated task completer with generated content")
             
             # Handle different editor commands
             if editor_command == "view":
@@ -2065,6 +2218,11 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     action = "Created" if mode == 'w' else "Updated"
                     logger.info(f"✅ {action} file: {target_path}")
                     
+                    # If this was a creative content task, mark it as complete
+                    if is_creative_content and self.task_completer and not self.task_completed:
+                        self.task_completed = True
+                        logger.info(f"Marked task as complete after saving creative content to {target_path}")
+                    
                     # Record successful tool usage
                     args_with_message = args.copy()
                     args_with_message["message"] = f"{action} file successfully"
@@ -2074,29 +2232,57 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     
                     # Return success message with file path and preview
                     preview = file_text[:200] + ("..." if len(file_text) > 200 else "")
-                    return (
+                    result_msg = (
                         f"Observed output of cmd `str_replace_editor` executed:\n"
                         f"{action} file successfully at: {path_str}\n\n"
                         f"Preview:\n{preview}"
                     )
                     
+                    # Add completion message for creative content
+                    if is_creative_content:
+                        result_msg += "\n\n✅ Creative content generated and saved successfully!"
+                        
+                    return result_msg
+                    
                 except Exception as e:
-                    logger.error(f"Failed to write to file {target_path}: {e}")
+                    error_msg = f"Failed to write to file {target_path}: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    
+                    # Update task completer with error if this was a creative content task
+                    if is_creative_content and self.task_completer:
+                        self.task_completer.add_information("content_generation_error", error_msg)
+                        logger.error("Recorded content generation error in task completer")
+                    
+                    # Record tool usage with error
                     args_with_message = args.copy()
-                    args_with_message["message"] = f"Failed to write to file: {e}"
+                    args_with_message["message"] = f"Failed to write to file: {str(e)}"
                     self.tool_tracker.record_tool_usage(
                         "str_replace_editor", args_with_message, "failure"
                     )
-                    return f"Error executing str_replace_editor: Failed to write to file '{path_str}'. {str(e)}"
+                    
+                    # Return detailed error message
+                    return (
+                        f"Error executing str_replace_editor: Failed to write to file '{path_str}'.\n"
+                        f"Error: {str(e)}"
+                    )
 
             # Check if this is a creative content task that needs generation
-            if editor_command == "create" and file_text and len(file_text) < 100 and self._is_creative_content_description(file_text):
+            # (This is a fallback in case the first check was missed)
+            if not is_creative_content and editor_command == "create" and file_text and len(file_text) < 100 and self._is_creative_content_description(file_text):
+                logger.info(f"Fallback detected creative content request: {file_text[:100]}...")
                 generated_content = await self._generate_creative_content(file_text)
                 if generated_content:
-                    # Replace the description with the actual generated content
-                    args["file_text"] = generated_content
+                    # Update the file_text with generated content
+                    file_text = generated_content
+                    args["file_text"] = file_text
                     command.function.arguments = json.dumps(args)
-                    logger.info(f"Generated creative content for '{file_text}'")
+                    logger.info("Successfully generated creative content in fallback")
+                    
+                    # Update task completer if available
+                    if self.task_completer and not self.task_completed:
+                        self.task_completer.add_information("content_generated", True)
+                        self.task_completer.add_information("generated_content", file_text)
+                        logger.info("Updated task completer with generated content in fallback")
 
             # Execute original command via base class
             result_str = await super().execute_tool(command)
@@ -2184,15 +2370,13 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         # 1. It has explicit creative indicators, OR
         # 2. It has a content type + task verb pattern, AND
         # 3. It's not a question (questions are better handled by research)
-        return (has_creative_indicator or has_content_task_pattern) and not is_question
-    
     async def _generate_creative_content(self, description: str) -> str:
         """Generate creative content based on the description."""
         try:
             logger.info(f"Generating creative content for: {description}")
             
             # Determine the type of creative content
-            content_type = "poem"  # Default
+            content_type = "essay"  # Default
             if "poem" in description.lower():
                 content_type = "poem"
             elif "story" in description.lower():
@@ -2205,38 +2389,64 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                 content_type = "script"
             
             # Extract style information if present
-            style_match = re.search(r"in the style of ([^,\.]+)", description, re.IGNORECASE)
+            style_match = re.search(r"in the style of ([^\.]+)", description, re.IGNORECASE)
             style = style_match.group(1) if style_match else ""
             
-            # Create a prompt for the LLM to generate the content
-            prompt = f"Create a {content_type} based on this description: {description}"
+            # Remove the 'save to' part from the description for content generation
+            clean_description = re.sub(r'\bsave\s+(?:it\s+)?(?:to|as)[\s"\']+[^\s"\']+', '', description, flags=re.IGNORECASE)
+            
+            # Create a more detailed prompt for the LLM
+            prompt = f"""I need you to create a {content_type} based on the following description:
+            
+{clean_description}
+
+Guidelines:
+1. Focus on the main topic: {clean_description}
+2. Create a {content_type} that is engaging and well-structured"""
+
             if style:
-                prompt += f". Make sure to follow the style of {style}."
-            prompt += " Be creative and detailed."
+                prompt += f"\n3. Write in the style of {style}"
+            
+            if content_type == "poem":
+                prompt += "\n4. Use poetic devices like metaphor, simile, and imagery"
+                prompt += "\n5. Pay attention to rhythm and flow"
+            elif content_type == "story":
+                prompt += "\n4. Include a clear beginning, middle, and end"
+                prompt += "\n5. Develop characters and setting"
+            
+            prompt += "\n\nPlease provide the {content_type} without any additional commentary or notes."
+            
+            # Log the prompt and messages for debugging
+            logger.info(f"[LLM PROMPT] Full creative content prompt:\n{prompt}")
+            messages = [{"role": "user", "content": prompt}]
+            logger.info(f"[LLM MESSAGES] Messages object being sent: {messages}")
             
             # Use the LLM to generate the content
-            # Create a message for the LLM
-            messages = [
-                {"role": "user", "content": prompt}
-            ]
-            
-            # Use the ask method instead of agenerate_text
-            response = await self.llm.ask(messages, stream=False)
-            
-            if response and len(response) > 0:
-                logger.info(f"Successfully generated {content_type} of length {len(response)}")
-                return response
-            else:
-                logger.warning(f"Failed to generate content for: {description}")
-                # Fallback content
-                return f"""# {description.capitalize()}
-
-{self._create_fallback_content(content_type, description)}"""
+            try:
+                # Use the ask method to generate the content
+                response = await self.llm.ask(messages, stream=False, temperature=0.8)
+                
+                if response and len(response) > 0:
+                    logger.info(f"Successfully generated {content_type} of length {len(response)}")
+                    
+                    # If we have a task completer, update it with the generated content
+                    if self.task_completer and not self.task_completed:
+                        self.task_completer.add_information("content_type", content_type)
+                        self.task_completer.add_information("content_style", style)
+                        logger.info(f"Updated task completer with content type: {content_type}")
+                    
+                    return response.strip()
+                else:
+                    logger.warning(f"Empty response when generating content for: {description}")
+                    return self._create_fallback_content(content_type, description)
+                    
+            except Exception as e:
+                logger.error(f"Error calling LLM for content generation: {e}", exc_info=True)
+                return self._create_fallback_content(content_type, description)
+                
         except Exception as e:
-            logger.error(f"Error generating creative content: {e}")
-            return f"""# {description.capitalize()}
-
-Unable to generate content due to an error."""
+            logger.error(f"Error in _generate_creative_content: {e}", exc_info=True)
+            return f"Error: Unable to generate content due to an error: {str(e)}"
     
     def _create_fallback_content(self, content_type: str, description: str) -> str:
         """Create fallback content when generation fails."""
@@ -2373,44 +2583,59 @@ except Exception as e:
             logger.info(f"Suggestion: Use browser_use for URL: {urls[0]}")
             return {
                 "tool": "browser_use",
-                "args": {"action": "go_to_url", "url": urls[0]},
+                "args": {"url": urls[0]}
             }
 
         # 3. Creative Content Generation -> Generate directly using str_replace_editor
         if self._is_creative_content_description(question):
             logger.info("Creative content generation task detected. Generating content with str_replace_editor.")
-            # Generate a filename based on the content type and topic
-            content_type = "essay"
-            if "poem" in q_lower:
-                content_type = "poem"
-            elif "story" in q_lower:
-                content_type = "story"
-                
-            # Extract the main topic for the filename
-            topic = "creative_content"
-            topic_match = re.search(r'(?:about|on|regarding|re:?)\s+(.+?)(?:\?|$)', question, re.IGNORECASE)
-            if topic_match:
-                topic = topic_match.group(1).strip()
-                
-            # Create a clean filename
-            from pathlib import Path
-            filename = f"{content_type}_{_slugify(topic)}.md"
+            
+            # Check if we need to save to a specific file
+            filename = None
+            if "save to" in q_lower or "save it as" in q_lower:
+                # Look for filename in quotes or after 'save to'/'save as'
+                save_match = re.search(r'save\s+(?:it\s+)?(?:to|as)[\s"\']+([^\s"\']+)', q_lower)
+                if save_match:
+                    filename = save_match.group(1).strip('"\'')
+            
+            # If no filename specified, generate one based on content type and topic
+            if not filename:
+                content_type = "essay"
+                if "poem" in q_lower:
+                    content_type = "poem"
+                elif "story" in q_lower:
+                    content_type = "story"
+                    
+                # Extract the main topic for the filename
+                topic = "creative_content"
+                topic_match = re.search(r'(?:about|on|regarding|re:?)\s+(.+?)(?:\?|$)', question, re.IGNORECASE)
+                if topic_match:
+                    topic = topic_match.group(1).strip()
+                    
+                # Create a clean filename
+                filename = f"{content_type}_{_slugify(topic)}.txt"
+            
             filepath = str(Path(config.workspace_root) / filename)
             
             # Generate the content
             content = await self._generate_creative_content(question)
             
-            return {
-                "tool": "str_replace_editor",
-                "args": {
-                    "command": "create",
-                    "path": filepath,
-                    "file_text": content
+            # If we have content, return the tool call to save it
+            if content:
+                return {
+                    "tool": "str_replace_editor",
+                    "args": {
+                        "command": "create",
+                        "path": filepath,
+                        "file_text": content
+                    }
                 }
-            }
-        
+            
+            return None
+            
         # 4. Research/Information -> browser_use for web research
         research_keywords = [
+            # Question words and phrases
             "what is", "who is", "when was", "where is", "why is", "how to",
             "tell me about", "explain", "define", "history of", "how does",
             "compare", "pros cons", "find info on", "news on", "statistics for",
@@ -2419,9 +2644,13 @@ except Exception as e:
             "details about", "facts about", "who was", "what are", "how many",
             "how much", "when did", "where did", "why did", "how did",
             "what caused", "what happened", "what makes", "what are the",
+            
+            # How-to and instructional
             "how to use", "how to make", "how to create", "how to build",
             "how to install", "how to set up", "how to configure",
             "tutorial on", "guide to", "tips for", "best way to", "how can i",
+            
+            # Information requests
             "what do you know about", "can you tell me about", "i need information on",
             "looking for information about", "search for", "find me", "show me"
         ]
@@ -2430,40 +2659,272 @@ except Exception as e:
         is_research_question = (
             (q_lower.endswith("?") or 
              any(q_word in q_lower for q_word in ["what", "who", "when", "where", "why", "how"])) 
-            and len(question) > 10
+            and len(question) > 5  # Reduced minimum length to catch more queries
             and any(kw in q_lower for kw in research_keywords)
         )
         
-        # Also check for questions that are statements but clearly researchable
+        # Check for statements that are clearly researchable
         is_research_statement = (
             not q_lower.endswith("?") 
             and any(kw in q_lower for kw in ["find", "search", "look up", "research"])
             and any(kw in q_lower for kw in ["about", "on", "for"])
         )
         
-        if is_research_question or is_research_statement:
+        # Enhanced historical figure mentions with variations and titles
+        historical_figures = {
+            # Leaders and rulers
+            'genghis khan': ['genghis', 'chinggis khan', 'great khan'],
+            'napoleon': ['napoleon bonaparte', 'emperor napoleon'],
+            'cleopatra': ['cleopatra vii', 'queen cleopatra'],
+            'julius caesar': ['caesar', 'julius caesar', 'gaius julius caesar'],
+            'alexander the great': ['alexander of macedon', 'alexander iii of macedon'],
+            'queen victoria': ['victoria of england', 'queen victoria'],
+            'winston churchill': ['sir winston churchill', 'churchill'],
+            'abraham lincoln': ['president lincoln', 'honest abe'],
+            'george washington': ['president washington', 'general washington'],
+            'queen elizabeth i': ['elizabeth i', 'queen elizabeth the first'],
+            'queen elizabeth ii': ['elizabeth ii', 'queen elizabeth the second'],
+            
+            # Scientists and inventors
+            'albert einstein': ['einstein', 'albert einstein'],
+            'marie curie': ['madame curie', 'marie sklodowska curie'],
+            'isaac newton': ['sir isaac newton', 'newton'],
+            'charles darwin': ['darwin', 'charles darwin'],
+            'thomas edison': ['edison', 'thomas alva edison'],
+            'nikola tesla': ['tesla', 'nikola tesla'],
+            'galileo galilei': ['galileo', 'galileo galilei'],
+            'stephen hawking': ['hawking', 'stephen hawking'],
+            
+            # Artists and writers
+            'leonardo da vinci': ['da vinci', 'leonardo'],
+            'william shakespeare': ['shakespeare', 'the bard', 'shakespeare'],
+            'pablo picasso': ['picasso', 'pablo picasso'],
+            'vincent van gogh': ['van gogh', 'vincent gogh'],
+            'wolfgang amadeus mozart': ['mozart', 'wolfgang mozart'],
+            'ludwig van beethoven': ['beethoven', 'ludwig beethoven'],
+            
+            # Philosophers and thinkers
+            'socrates': ['socrates'],
+            'plato': ['plato'],
+            'aristotle': ['aristotle'],
+            'confucius': ['kong fuzi', 'confucius'],
+            'buddha': ['siddhartha gautama', 'gautama buddha', 'the buddha'],
+            
+            # Religious figures
+            'jesus christ': ['jesus', 'jesus of nazareth', 'jesus christ'],
+            'prophet muhammad': ['muhammad', 'prophet muhammad', 'mohammed'],
+            'mahatma gandhi': ['gandhi', 'mahatma gandhi', 'mohandas gandhi'],
+            'martin luther': ['martin luther', 'martin luther king jr'],
+            'martin luther king jr': ['mlk', 'dr martin luther king', 'martin luther king'],
+            
+            # Modern figures
+            'nelson mandela': ['mandela', 'nelson mandela'],
+            'steve jobs': ['steve jobs', 'steven jobs'],
+            'bill gates': ['gates', 'william henry gates iii', 'bill gates'],
+            'mark zuckerberg': ['zuckerberg', 'mark zuckerberg'],
+            'elon musk': ['musk', 'elon musk'],
+            'jeff bezos': ['bezos', 'jeff bezos'],
+            'warren buffett': ['buffett', 'warren buffett']
+        }
+        
+        # Check for creative tasks about known figures/events
+        is_creative_about_known = any(
+            phrase in q_lower 
+            for phrase in [
+                "create a", "write a", "compose a", "make a", "generate a",
+                "create an", "write an", "compose an", "make an", "generate an"
+            ]
+        )
+        
+        # Check for direct historical figure questions
+        is_historical_figure_question = False
+        is_creative_writing = False
+        
+        # Check for figure mentions in the question
+        mentioned_figure = None
+        for figure_name, variations in historical_figures.items():
+            # Check canonical name
+            if figure_name in q_lower:
+                mentioned_figure = figure_name
+                break
+            # Check variations
+            for variation in variations:
+                if variation in q_lower:
+                    mentioned_figure = figure_name
+                    break
+            if mentioned_figure:
+                break
+        
+        # If we found a figure, check the type of question
+        if mentioned_figure:
+            if any(q_lower.startswith(prefix) for prefix in ["who is", "who was", "what is"]) or \
+               any(phrase in q_lower for phrase in ["tell me about", "information about"]):
+                is_historical_figure_question = True
+            
+            if any(phrase in q_lower for phrase in [
+                "write a poem about", "compose a story about", "create a tale about",
+                "write an epic about", "create a narrative about", "compose a ballad about"
+            ]):
+                is_creative_writing = True
+                is_creative_about_known = True
+        
+        if any([
+            is_research_question,
+            is_research_statement,
+            is_creative_about_known,
+            is_historical_figure_question,
+            is_creative_writing
+        ]):
             # Extract key search terms from the question
             search_query = question.replace("?", "").strip()
             
             # For certain types of questions, create a more specific search query
-            if any(kw in q_lower for kw in ["example", "template", "design", "layout"]):
-                search_query = f"examples of {search_query}"
-            elif any(kw in q_lower for kw in ["biography", "about", "who is", "who was"]):
-                search_query = f"{search_query} biography"
-            elif any(kw in q_lower for kw in ["history", "historical"]):
-                search_query = f"{search_query} history"
+            if mentioned_figure:
+                # For known historical figures, create more targeted queries
+                if "poem" in q_lower:
+                    search_query = f"{mentioned_figure} key facts and achievements for a poem"
+                elif "story" in q_lower or "tale" in q_lower or "narrative" in q_lower:
+                    search_query = f"{mentioned_figure} life story and important events"
+                elif any(kw in q_lower for kw in ["biography", "about", "who is", "who was"]):
+                    search_query = f"{mentioned_figure} biography key facts"
+                elif any(kw in q_lower for kw in ["history", "historical"]):
+                    search_query = f"{mentioned_figure} historical significance and timeline"
+                elif any(kw in q_lower for kw in ["achievements", "accomplishments"]):
+                    search_query = f"{mentioned_figure} major achievements and contributions"
+                else:
+                    search_query = f"{mentioned_figure} key information and facts"
+            else:
+                # For general queries
+                if any(kw in q_lower for kw in ["example", "template", "design", "layout"]):
+                    search_query = f"examples of {search_query}"
+                elif any(kw in q_lower for kw in ["biography", "about", "who is", "who was"]):
+                    search_query = f"{search_query} biography"
+                elif any(kw in q_lower for kw in ["history", "historical"]):
+                    search_query = f"{search_query} history"
+                elif is_creative_about_known:
+                    if "poem" in q_lower:
+                        search_query = f"{search_query} key facts and achievements"
+                    elif "story" in q_lower:
+                        search_query = f"{search_query} life story"
+                    else:
+                        search_query = f"{search_query} key information"
             
             # Clean up the query
             search_query = re.sub(r'^(can you|please|could you|would you|i need|i want|find|search|look up|research|information on|about|on|for)', '', search_query, flags=re.IGNORECASE)
             search_query = re.sub(r'\s+', ' ', search_query).strip()
             
-            # Use browser_use with a search URL
-            search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
-            logger.info(f"Research question detected, using browser_use to search: {search_query}")
-            return {
-                "tool": "browser_use",
-                "args": {"action": "go_to_url", "url": search_url},
-            }
+            # For creative tasks, set up the task completer if needed
+            if is_creative_about_known or is_creative_writing or is_historical_figure_question:
+                if not self.task_completer:
+                    self.task_completer = TaskCompleter()
+                    self.task_completer.task_type = "creative_writing"
+                    
+                # Use the mentioned figure if we found one, otherwise try to extract from query
+                subject = mentioned_figure if mentioned_figure else search_query
+                
+                # If we still don't have a subject, try to extract using patterns
+                if not subject or subject == search_query:
+                    name_patterns = [
+                        r"(?:write|create|compose) (?:a|an) (?:poem|story|tale|epic|ballad|narrative) (?:about|on|for) ([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})",
+                        r"(?:write|create|compose) (?:a|an) (?:poem|story|tale|epic|ballad|narrative) (?:about|on|for) (?:the )?([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})'s",
+                        r"(?:who|what) (?:is|was) ([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})",
+                        r"tell me about ([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})",
+                        r"(.*?)(?:'s|')? (?:biography|life story|history)"
+                    ]
+                    
+                    for pattern in name_patterns:
+                        match = re.search(pattern, question, re.IGNORECASE)
+                        if match and match.group(1).strip():
+                            potential_subject = match.group(1).strip()
+                            # Check if the extracted name matches any known figure or variation
+                            for figure_name, variations in historical_figures.items():
+                                if (potential_subject.lower() == figure_name.lower() or 
+                                    any(v.lower() == potential_subject.lower() for v in variations)):
+                                    subject = figure_name
+                                    break
+                            if subject != search_query:
+                                break
+                
+                # Determine the type of creative task
+                task_type = "story"  # default
+                if "poem" in q_lower:
+                    task_type = "poem"
+                elif any(term in q_lower for term in ["tale", "narrative"]):
+                    task_type = "narrative"
+                elif any(term in q_lower for term in ["song", "ballad"]):
+                    task_type = "song"
+                
+                # Set up task completer with extracted information
+                self.task_completer.add_information("subject", subject)
+                self.task_completer.add_information("task_type", task_type)
+                
+                # Set tone based on the subject and task type
+                tone = "informative"
+                if any(term in q_lower for term in ["inspiring", "motivational"]):
+                    tone = "inspirational"
+                elif any(term in q_lower for term in ["dramatic", "epic"]):
+                    tone = "dramatic"
+                elif any(term in q_lower for term in ["funny", "humorous", "comic"]):
+                    tone = "humorous"
+                
+                # Set style based on the subject
+                style = "historical"
+                if any(term in q_lower for term in ["modern", "contemporary"]):
+                    style = "modern"
+                elif any(term in q_lower for term in ["fantasy", "mythical"]):
+                    style = "fantasy"
+                elif any(term in q_lower for term in ["sci-fi", "futuristic"]):
+                    style = "sci-fi"
+                
+                # Add all information to task completer
+                self.task_completer.add_information("tone", tone)
+                self.task_completer.add_information("style", style)
+                self.task_completer.add_information("original_request", question)
+                
+                # If we have a historical figure, add context about their time period
+                if mentioned_figure:
+                    # Add time period context if available
+                    time_period = self._get_time_period_for_figure(mentioned_figure)
+                    if time_period:
+                        self.task_completer.add_information("time_period", time_period)
+                    
+                    # Add category (scientist, leader, artist, etc.)
+                    category = self._get_category_for_figure(mentioned_figure)
+                    if category:
+                        self.task_completer.add_information("category", category)
+                
+                logger.info(f"Initialized task completer for {task_type} about: {subject}")
+                
+                # For creative tasks, generate content directly
+                if is_creative_about_known or is_creative_writing:
+                    logger.info(f"Generating {task_type} about: {subject}")
+                    content = await self._generate_creative_content(f"A {task_type} about {subject} in the style of {tone} with a {style} style")
+                    
+                    # Save the content to the specified file if filename was provided
+                    filename = "output.txt"  # Default filename
+                    if "save it as" in q_lower:
+                        match = re.search(r'save it as ["\']?([^"\'\s]+)["\']?', q_lower)
+                        if match:
+                            filename = match.group(1)
+                    
+                    filepath = os.path.join(config.workspace_root, filename)
+                    return {
+                        "tool": "str_replace_editor",
+                        "args": {
+                            "command": "create",
+                            "path": filepath,
+                            "file_text": content
+                        }
+                    }
+                
+                # For non-creative tasks, perform research
+                if subject and len(subject.split()) <= 3:  # Basic check for a reasonable name
+                    logger.info(f"Initiating research for: {subject}")
+                    research_query = f"{subject} biography key facts"
+                    return {
+                        "tool": "browser_use",
+                        "args": {"url": f"https://duckduckgo.com/?q={research_query.replace(' ', '+')}"}
+                    }
 
         # 4. File Operations -> str_replace_editor or python_execute
         file_keywords = [
@@ -2527,6 +2988,109 @@ except Exception as e:
                     f"Failed to store context in persistent memory: {e}", exc_info=True
                 )
 
+    def _get_time_period_for_figure(self, figure_name: str) -> Optional[str]:
+        """Get the time period for a historical figure."""
+        time_periods = {
+            # Ancient
+            'socrates': 'Ancient Greece (5th-4th century BCE)',
+            'plato': 'Ancient Greece (4th century BCE)',
+            'aristotle': 'Ancient Greece (4th century BCE)',
+            'alexander the great': 'Ancient Greece (4th century BCE)',
+            'julius caesar': 'Roman Republic (1st century BCE)',
+            'cleopatra': 'Hellenistic Period (1st century BCE)',
+            'buddha': 'Ancient India (6th-5th century BCE)',
+            'confucius': 'Ancient China (6th-5th century BCE)',
+            
+            # Middle Ages
+            'genghis khan': 'Middle Ages (12th-13th century)',
+            'queen elizabeth i': 'Elizabethan Era (16th century)',
+            
+            # Modern
+            'isaac newton': 'Scientific Revolution (17th-18th century)',
+            'wolfgang amadeus mozart': 'Classical Period (18th century)',
+            'ludwig van beethoven': 'Classical/Romantic Period (late 18th-early 19th century)',
+            'napoleon': 'Napoleonic Era (early 19th century)',
+            'queen victoria': 'Victorian Era (19th century)',
+            'charles darwin': '19th century',
+            'nikola tesla': 'Late 19th - Early 20th century',
+            'thomas edison': 'Late 19th - Early 20th century',
+            'marie curie': 'Early 20th century',
+            'albert einstein': 'Early to mid 20th century',
+            'winston churchill': 'World War II era (mid 20th century)',
+            'martin luther king jr': 'Civil Rights Movement (mid 20th century)',
+            'stephen hawking': 'Late 20th - Early 21st century',
+            
+            # Contemporary
+            'steve jobs': 'Late 20th - Early 21st century',
+            'bill gates': 'Late 20th - Early 21st century',
+            'elon musk': '21st century',
+            'mark zuckerberg': '21st century',
+            'jeff bezos': '21st century',
+            'warren buffett': 'Late 20th - Early 21st century'
+        }
+        
+        return time_periods.get(figure_name.lower())
+    
+    def _get_category_for_figure(self, figure_name: str) -> Optional[str]:
+        """Get the category (scientist, leader, etc.) for a historical figure."""
+        categories = {
+            # Leaders and rulers
+            'genghis khan': 'military leader',
+            'napoleon': 'military leader',
+            'cleopatra': 'ruler',
+            'julius caesar': 'military leader',
+            'alexander the great': 'military leader',
+            'queen victoria': 'monarch',
+            'winston churchill': 'political leader',
+            'abraham lincoln': 'political leader',
+            'george washington': 'political leader',
+            'queen elizabeth i': 'monarch',
+            'queen elizabeth ii': 'monarch',
+            'nelson mandela': 'political leader',
+            'mahatma gandhi': 'political leader',
+            'martin luther king jr': 'civil rights leader',
+            
+            # Scientists and inventors
+            'albert einstein': 'scientist',
+            'marie curie': 'scientist',
+            'isaac newton': 'scientist',
+            'charles darwin': 'scientist',
+            'thomas edison': 'inventor',
+            'nikola tesla': 'inventor',
+            'galileo galilei': 'scientist',
+            'stephen hawking': 'scientist',
+            
+            # Artists and writers
+            'leonardo da vinci': 'artist',
+            'william shakespeare': 'writer',
+            'pablo picasso': 'artist',
+            'vincent van gogh': 'artist',
+            'wolfgang amadeus mozart': 'composer',
+            'ludwig van beethoven': 'composer',
+            
+            # Philosophers and thinkers
+            'socrates': 'philosopher',
+            'plato': 'philosopher',
+            'aristotle': 'philosopher',
+            'confucius': 'philosopher',
+            'buddha': 'spiritual leader',
+            
+            # Religious figures
+            'jesus christ': 'religious leader',
+            'prophet muhammad': 'religious leader',
+            'martin luther': 'religious leader',
+            
+            # Modern figures
+            'steve jobs': 'business leader',
+            'bill gates': 'business leader',
+            'mark zuckerberg': 'business leader',
+            'elon musk': 'business leader',
+            'jeff bezos': 'business leader',
+            'warren buffett': 'business leader'
+        }
+        
+        return categories.get(figure_name.lower())
+    
     @property
     def context_manager(self):
         """Provides access to PersistentMemory instance for context operations."""
@@ -2586,12 +3150,20 @@ except Exception as e:
                     tags=["task_completed", "deliverable"],
                 )
                 self.task_completed = True
-                # Decide whether to terminate automatically or let LLM call Terminate
-                # For now, let LLM decide based on the completion message
-                # return True # Returning True might short-circuit LLM call
-                logger.info(
-                    "Task marked as completed. LLM will decide next step (e.g., Terminate)."
-                )
+                # After completing a task, prepare for the next one
+                logger.info("Task marked as completed. Ready for next task.")
+                
+                # Clear the current task and reset completion state
+                self.current_task = ""
+                self.task_completed = False
+                
+                # Clear the task completer to prepare for the next task
+                self.task_completer = None
+                
+                # Add a prompt for the next task
+                next_task_prompt = "\n\nTask completed successfully! What would you like me to help you with next?"
+                self.update_memory("assistant", next_task_prompt)
+                return False  # Continue processing
             except Exception as e:
                 logger.error(f"Error during task completion/saving: {e}", exc_info=True)
                 self.add_to_context(
@@ -2761,38 +3333,200 @@ except Exception as e:
 
     # Included previously necessary helpers like _process_content_for_task etc. if needed by the above logic
     # Need to ensure all called helpers are defined.
-    def _extract_section(self, content: str, section_name: str) -> str:
-        """Placeholder: Extracts a specific section based on keywords."""
-        # This needs a more robust implementation (e.g., using heading tags)
-        pattern = re.compile(
-            f"(?:^|\n)[#\s]*{re.escape(section_name)}[^\n]*\n(.*?)(?:\n[#\s]*\w+|\Z)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        match = pattern.search(content)
-        if match:
-            return match.group(1).strip()[:1000]  # Limit length
-        # Fallback: find first mention
-        idx = content.lower().find(section_name.lower())
-        if idx != -1:
-            return content[idx : idx + 500].strip() + "..."
-        return f"(Section '{section_name}' not clearly identified)"
+    def _extract_section(self, content: str, section_name: str, max_paragraphs: int = 3) -> str:
+        """Extract a specific section from content based on section name.
+        
+        Args:
+            content: The full content to search in
+            section_name: The name of the section to extract
+            max_paragraphs: Maximum number of paragraphs to include
+            
+        Returns:
+            str: The extracted section content or empty string if not found
+        """
+        try:
+            # First try to find the section using HTML structure
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Look for common section patterns
+            patterns = [
+                # Headers with the section name
+                lambda: soup.find(['h1', 'h2', 'h3'], string=lambda t: t and section_name.lower() in t.lower()),
+                # Section/div with class or id containing section name
+                lambda: soup.find(['section', 'div'], 
+                                class_=lambda c: c and section_name.lower() in c.lower()),
+                lambda: soup.find(['section', 'div'], 
+                                id=lambda i: i and section_name.lower() in i.lower()),
+                # Articles with section name in class/id
+                lambda: soup.find('article', 
+                               class_=lambda c: c and section_name.lower() in c.lower()),
+                # Fallback: find any element with section name in text
+                lambda: soup.find(string=lambda t: t and section_name.lower() in t.lower())
+            ]
+            
+            section_element = None
+            for pattern in patterns:
+                try:
+                    element = pattern()
+                    if element:
+                        section_element = element
+                        break
+                except:
+                    continue
+            
+            if not section_element:
+                return ""
+            
+            # Get the parent element if we found a text node
+            if not hasattr(section_element, 'find_all'):
+                section_element = section_element.parent
+            
+            # Extract the content after the section header
+            content_parts = []
+            current = section_element
+            
+            # Get the next siblings until we hit another header or max_paragraphs
+            while current and len(content_parts) < max_paragraphs:
+                current = current.find_next_sibling()
+                if not current:
+                    break
+                    
+                # Stop at next section
+                if current.name and current.name.startswith('h') and len(current.name) == 2:
+                    break
+                    
+                # Get text from paragraph or other block element
+                if current.name in ['p', 'div', 'section']:
+                    text = current.get_text(separator=' ', strip=True)
+                    if text:
+                        content_parts.append(text)
+            
+            return ' '.join(content_parts) if content_parts else ""
+            
+        except Exception as e:
+            logger.error(f"Error extracting section '{section_name}': {str(e)}")
+            return ""
 
     def _process_content_for_task(self, url: str, content: str) -> None:
-        """Process extracted web content to fill TaskCompleter info."""
+        """Process extracted web content to fill TaskCompleter info.
+        
+        This method processes web content and extracts relevant information
+        based on the current task type and requirements.
+        """
         if not self.task_completer:
+            logger.debug("No task completer available, skipping content processing")
             return
 
-        logger.debug(
-            f"Processing content from {url} for task type: {self.task_completer.task_type}"
-        )
+        logger.debug(f"Processing content from {url} for task type: {self.task_completer.task_type}")
         task_type = (self.task_completer.task_type or "").lower()
+        required = self.task_completer.get_missing_info()
+        
+        # Always process content to extract and store information
+        # even if we don't have specific requirements yet
 
-        # Example for Marketing Plan (add more types and refine logic)
-        if "marketing_plan" in task_type:
-            required = self.task_completer.get_missing_info()
-            if not required:
-                return  # Don't process if already complete
+        # Handle creative content tasks (poems, stories, etc.)
+        if any(t in task_type for t in ["poem", "story", "creative"]):
+            try:
+                # Initialize data structures
+                key_facts = []
+                metadata = {}
+                
+                # Parse HTML and extract basic information
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Extract title and metadata
+                title = soup.title.string if soup.title else ""
+                if title and len(title) < 200:  # Reasonable title length
+                    metadata['title'] = title.strip()
+                    key_facts.append(f"Title: {title.strip()}")
+                
+                # Extract meta description and keywords if available
+                for meta in soup.find_all('meta'):
+                    name = meta.get('name', '').lower()
+                    if name == 'description':
+                        metadata['description'] = meta.get('content', '')
+                    elif name == 'keywords':
+                        metadata['keywords'] = meta.get('content', '')
+                
+                # Extract key sections using semantic HTML and common patterns
+                section_headers = [
+                    'early life', 'biography', 'achievements', 'legacy', 'personal life',
+                    'accomplishments', 'timeline', 'key events', 'major works', 'notable works'
+                ]
+                
+                for header in section_headers:
+                    section = self._extract_section(content, header)
+                    if section and len(section) > 50:  # Only include meaningful sections
+                        key_facts.append(f"{header.title()}: {section}")
+                
+                # Extract dates and key events with better patterns
+                date_patterns = [
+                    r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',
+                    r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b',
+                    r'\b(?:19|20)\d{2}\b'
+                ]
+                
+                dates = []
+                for pattern in date_patterns:
+                    dates.extend(re.findall(pattern, content, re.IGNORECASE))
+                
+                if dates:
+                    unique_dates = sorted(set(dates), key=len, reverse=True)  # Sort by length (most specific first)
+                    key_facts.append(f"Key Dates: {', '.join(unique_dates[:10])}")  # Limit to top 10 dates
+                
+                # Add to task completer if we found useful information
+                if key_facts:
+                    # Store all extracted facts
+                    facts_text = "\n".join(key_facts)
+                    self.task_completer.add_information("key_facts", facts_text)
+                    logger.info(f"Extracted {len(key_facts)} key facts for creative content")
+                    
+                    # Store metadata if available
+                    if metadata:
+                        for key, value in metadata.items():
+                            if value:  # Only store non-empty values
+                                self.task_completer.add_information(f"meta_{key}", value)
+                    
+                    # Set subject if not already set
+                    if "subject" in required and not self.task_completer.get_information("subject"):
+                        if 'title' in metadata:
+                            self.task_completer.add_information("subject", metadata['title'])
+                        elif title:
+                            self.task_completer.add_information("subject", title)
+                    
+                    # Infer tone from content if needed
+                    if "tone" in required and not self.task_completer.get_information("tone"):
+                        content_lower = content.lower()
+                        tone_keywords = {
+                            'serious': ['tragic', 'sad', 'death', 'war', 'battle', 'struggle'],
+                            'triumphant': ['victory', 'success', 'achievement', 'won', 'triumph'],
+                            'inspiring': ['inspire', 'courage', 'brave', 'determination', 'overcome'],
+                            'informative': ['report', 'study', 'research', 'findings', 'analysis']
+                        }
+                        
+                        detected_tones = []
+                        for tone, keywords in tone_keywords.items():
+                            if any(keyword in content_lower for keyword in keywords):
+                                detected_tones.append(tone)
+                        
+                        # Default to informative if no strong tone detected
+                        tone = detected_tones[0] if detected_tones else 'informative'
+                        self.task_completer.add_information("tone", tone)
+                    
+                    # Set style if needed
+                    if "style" in required and not self.task_completer.get_information("style"):
+                        # Default to historical for biographies, otherwise narrative
+                        style = "historical" if "biography" in content_lower else "narrative"
+                        self.task_completer.add_information("style", style)
+                    
+                    # Add source URL for reference
+                    self.task_completer.add_information("source_url", url)
+                        
+            except Exception as e:
+                logger.error(f"Error processing content for creative task: {e}", exc_info=True)
 
+        # Handle marketing plan tasks
+        elif "marketing_plan" in task_type:
             # Simple keyword-based extraction for example
             if "product_name" in required:
                 # Try to find product name in title or h1
@@ -2809,7 +3543,6 @@ except Exception as e:
                 "target_audience": ["target audience", "who is it for", "customers"],
                 "value_proposition": ["value proposition", "benefits", "why choose"],
                 "features": ["features", "capabilities", "what it does"],
-                # Add more sections
             }
             for section_key, keywords in sections_keywords.items():
                 if section_key in required:
