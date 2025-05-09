@@ -82,10 +82,14 @@ class TaskCompleter(BaseModel):
                 "organization_structure", "product_line", "marketing_strategy",
                 "financial_projections"
             ]
+        elif ("essay" in task_lower or "longform essay" in task_lower or "long-form essay" in task_lower):
+            self.task_type = "essay"
+            self.task_requirements = ["subject", "style", "tone"]
+            # Extract information from the task description
+            self._extract_creative_content_info(task_description)
         elif "poem" in task_lower or "poetry" in task_lower:
             self.task_type = "poem"
             self.task_requirements = ["subject", "style", "tone"]
-            
             # Extract information from the task description
             self._extract_creative_content_info(task_description)
         elif "research report" in task_lower or "research paper" in task_lower:

@@ -3,8 +3,8 @@ import time
 import asyncio
 import json
 import logging
-import random
 import re
+import os
 import traceback  # For detailed error logging in python_execute
 from datetime import datetime  # Added for timestamps
 from pathlib import Path  # Added for path manipulation
@@ -332,10 +332,88 @@ class ImprovedManus(ToolCallAgent):
         self._initialized = False
         logger.info("ImprovedManus cleanup complete.")
 
+    def _parse_task_keyword(self, task: str) -> Tuple[Optional[str], str]:
+        """Extracts a routing keyword (e.g., 'research:', 'create:') from the start of the prompt, returns (keyword, prompt)."""
+        task = task.lstrip()
+        for kw in ["research:", "create:", "summarize:", "analyze:", "plan:"]:
+            if task.lower().startswith(kw):
+                return kw[:-1], task[len(kw):].lstrip()
+        return None, task
+
+    def _list_keywords(self):
+        """Return a string listing all available routing keywords and their descriptions."""
+        return (
+            "Available routing keywords:\n"
+            "  create:    Generate creative content (poems, essays, stories, etc.)\n"
+            "  research:  Perform research, use browser/tools, or comparative analysis\n"
+            "  summarize: Summarize content or documents\n"
+            "  analyze:   Analyze information or data\n"
+            "  plan:      Create plans or outlines\n"
+            "\nExample usage: create: Write a poem about the sea.\n"
+            "You can also use natural language without a keyword—agent will infer intent."
+        )
+
     async def analyze_new_task(self, task: str) -> None:
-        """Analyze a new task to determine required information and steps."""
+        """Analyze the new task and set up required information."""
+        if task.strip() == "/keywords":
+            self._explicit_task_type = "keywords"
+            self._explicit_task_prompt = self._list_keywords()
+            logger.info("[KEYWORD LIST] User requested list of routing keywords.")
+            return
+        keyword, prompt = self._parse_task_keyword(task)
+        if keyword:
+            logger.info(f"[KEYWORD ROUTING] Detected keyword: '{keyword}'. Routing explicitly.")
+            self.conversation_memory.reset_for_new_task()
+            
+            # Special handling for 'create:' keyword - directly generate creative content
+            if keyword == "create":
+                logger.info(f"[CREATE KEYWORD] Directly generating creative content for: {prompt}")
+                try:
+                    # Generate the content
+                    content = await self._generate_creative_content(prompt)
+                    
+                    # Check for filename in the prompt
+                    filename_match = re.search(r'save (?:to|as)\s*["\']([^"\']+)\s*["\']', prompt, re.IGNORECASE)
+                    if not filename_match:
+                        # Try without quotes
+                        filename_match = re.search(r'save (?:to|as)\s+([\w\-.\/\\]+)', prompt, re.IGNORECASE)
+                    
+                    if filename_match:
+                        filename = filename_match.group(1).strip('"\'')
+                        # Create full path relative to workspace
+                        full_path = os.path.join(config.workspace_root, filename)
+                        # Make directory if it doesn't exist
+                        os.makedirs(os.path.dirname(os.path.abspath(full_path)), exist_ok=True)
+                        # Save the content
+                        with open(full_path, 'w') as f:
+                            f.write(content)
+                        logger.info(f"[FILE SAVE] Creative content saved to: {full_path}")
+                        self.update_memory("assistant", f"I've written the content and saved it to '{filename}'.\n\n{content[:200]}... [content truncated]")
+                    else:
+                        # No filename found, add to memory directly
+                        self.update_memory("assistant", f"Here's the creative content you requested:\n\n{content}")
+                except Exception as e:
+                    logger.error(f"[CREATE ERROR] Failed to generate creative content: {e}", exc_info=True)
+                    self.update_memory("assistant", f"I tried to create the content, but encountered an error: {str(e)}")
+                    
+                # Mark task as explicitly handled
+                self._explicit_task_type = "completed"
+                return
+                
+            # Regular keyword handling for other keywords
+            self.task_completer = TaskCompleter(task=prompt)
+            self._explicit_task_type = keyword
+            self._explicit_task_prompt = prompt
+            return
         logger.info(f"Analyzing new task: '{task[:100]}...'")
         # Reset components for new task
+        if self.conversation_memory:
+            self.conversation_memory.reset_for_new_task()
+        self.task_completer = TaskCompleter(task=task)
+        self._explicit_task_type = None
+        self._explicit_task_prompt = None
+
+        # Reset persistent memory context for new task
         if self.conversation_memory:
             self.conversation_memory.reset()  # Reset persistent memory context for new task
             logger.info("Persistent memory reset for new task.")
@@ -945,30 +1023,30 @@ class ImprovedManus(ToolCallAgent):
                     browser_tool = self.available_tools.get_tool("browser_use")
                     if not browser_tool:
                         continue
-                        
-                    # Get page content
-                    content_result = await browser_tool.extract_content("Extract the main article or content body")
-                    if not content_result or not content_result.output:
-                        logger.warning(f"No content extracted from {url}")
-                        continue
-                        
-                    content = content_result.output
-                    content_length = len(content)
-                    
-                    # Skip if content is too short or too long
-                    if content_length < min_content_length:
-                        logger.info(f"Skipping {url} - content too short: {content_length} chars")
-                        continue
-                        
-                    if content_length > max_content_length:
-                        content = content[:max_content_length]
-                        logger.info(f"Truncated content from {url} to {max_content_length} chars")
-                    
-                    # Use browser_use tool with web_search action
-                    search_result = await self.execute_browser_use(
-                        action="web_search",
+
+                    # Use the LLM to generate the content
+                    try:
+                        response = await self.llm.ask(messages, stream=False, temperature=0.8)
+                        content = response["content"] if isinstance(response, dict) and "content" in response else response
+                        logger.info(f"Creative content generated successfully.")
+                    except Exception as e:
+                        logger.error(f"Error generating creative content: {e}")
+                        content = "[Error generating content]"
+
+                    # Save to file if filename was specified
+                    if filename and content:
+                        try:
+                            import os
+                            workspace_dir = os.path.join(os.getcwd(), "workspace")
+                            file_path = filename if os.path.isabs(filename) else os.path.join(workspace_dir, filename)
+                            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                            with open(file_path, "w", encoding="utf-8") as f:
+                                f.write(content)
+                            logger.info(f"[FILE SAVE] Creative content saved to: {file_path}")
+                        except Exception as file_err:
+                            logger.error(f"[FILE SAVE ERROR] Could not save file '{filename}': {file_err}")
+
                         query=query
-                    )
                     
                     # Process for task relevance
                     if self.task_completer:
@@ -2303,12 +2381,11 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             logger.error(
                 f"Unexpected error in _handle_str_replace_editor: {e}", exc_info=True
             )
-            args_with_message = args.copy() if isinstance(args, dict) else {"arguments": args}
-            args_with_message["message"] = f"Outer handler error: {str(e)}"
+            arg_info = {"arguments": args_str}
             self.tool_tracker.record_tool_usage(
-                "str_replace_editor", args_with_message, "failure"
+                "str_replace_editor", arg_info, "failure", f"Outer handler error: {str(e)}"
             )
-            return f"Error executing str_replace_editor: Unexpected error. {str(e)}"
+            return f"Error handling str_replace_editor: Unexpected error. {str(e)}"
             
     def _is_creative_content_description(self, text: str) -> bool:
         """Determine if the text is a description of creative content that needs to be generated."""
@@ -2370,107 +2447,114 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         # 1. It has explicit creative indicators, OR
         # 2. It has a content type + task verb pattern, AND
         # 3. It's not a question (questions are better handled by research)
+        # Keyword override
+        if hasattr(self, '_explicit_task_type') and self._explicit_task_type == 'research':
+            return False
+
     async def _generate_creative_content(self, description: str) -> str:
-        """Generate creative content based on the description."""
+        """Generate creative content based on the description. If 'save to' or 'save as' is present, save the result to the specified file."""
         try:
             logger.info(f"Generating creative content for: {description}")
-            
-            # Determine the type of creative content
-            content_type = "essay"  # Default
-            if "poem" in description.lower():
-                content_type = "poem"
-            elif "story" in description.lower():
-                content_type = "story"
-            elif "essay" in description.lower():
-                content_type = "essay"
-            elif "song" in description.lower():
-                content_type = "song"
-            elif "script" in description.lower():
-                content_type = "script"
-            
-            # Extract style information if present
-            style_match = re.search(r"in the style of ([^\.]+)", description, re.IGNORECASE)
-            style = style_match.group(1) if style_match else ""
-            
-            # Remove the 'save to' part from the description for content generation
-            clean_description = re.sub(r'\bsave\s+(?:it\s+)?(?:to|as)[\s"\']+[^\s"\']+', '', description, flags=re.IGNORECASE)
-            
-            # Create a more detailed prompt for the LLM
-            prompt = f"""I need you to create a {content_type} based on the following description:
-            
-{clean_description}
 
-Guidelines:
-1. Focus on the main topic: {clean_description}
-2. Create a {content_type} that is engaging and well-structured"""
+            # Extract filename if present (save to/save as)
+            filename = None
+            filename_match = re.search(r'save (?:to|as)\s*["\']([^"\']+)\s*["\']', description, re.IGNORECASE)
+            if not filename_match:
+                filename_match = re.search(r'save (?:to|as)\s+([\w\-.\/\\]+)', description, re.IGNORECASE)
+            if filename_match:
+                filename = filename_match.group(1).strip('"\'')
+
+            # Extract content type and style
+            content_type = "essay"
+            style = None
+            desc_lower = description.lower()
+            if "poem" in desc_lower:
+                content_type = "poem"
+            elif "story" in desc_lower or "novel" in desc_lower or "short story" in desc_lower:
+                content_type = "story"
+            elif "song" in desc_lower or "lyrics" in desc_lower:
+                content_type = "song"
+            elif "script" in desc_lower or "screenplay" in desc_lower or "play" in desc_lower:
+                content_type = "script"
+            elif "letter" in desc_lower:
+                content_type = "letter"
+            elif "speech" in desc_lower:
+                content_type = "speech"
+            elif "report" in desc_lower:
+                content_type = "report"
+            elif "review" in desc_lower:
+                content_type = "review"
+            elif "analysis" in desc_lower:
+                content_type = "analysis"
+            elif "summary" in desc_lower:
+                content_type = "summary"
+            elif "blog post" in desc_lower or "blog" in desc_lower or "article" in desc_lower:
+                content_type = "blog post"
+            elif "paper" in desc_lower:
+                content_type = "paper"
+            elif "thesis" in desc_lower:
+                content_type = "thesis"
+            elif "dissertation" in desc_lower:
+                content_type = "dissertation"
+
+            # Check for style
+            style_match = re.search(r'in the style of (.+?)(?:\?|$)', description, re.IGNORECASE)
+            if style_match:
+                style = style_match.group(1).strip()
+
+            # Clean the description
+            clean_description = description
+            if filename:
+                clean_description = re.sub(r'save (?:to|as)\s*["\']?[^"\']+["\']?', '', clean_description, flags=re.IGNORECASE)
+            if style:
+                clean_description = re.sub(r'in the style of .+?(?:\?|$)', '', clean_description, flags=re.IGNORECASE)
+
+            # Create a more detailed prompt for the LLM
+            prompt = f"""I need you to create a {content_type} based on the following description:\n\n{clean_description}\n\nGuidelines:\n1. Focus on the main topic: {clean_description}\n2. Create a {content_type} that is engaging and well-structured"""
 
             if style:
                 prompt += f"\n3. Write in the style of {style}"
-            
             if content_type == "poem":
                 prompt += "\n4. Use poetic devices like metaphor, simile, and imagery"
                 prompt += "\n5. Pay attention to rhythm and flow"
             elif content_type == "story":
                 prompt += "\n4. Include a clear beginning, middle, and end"
                 prompt += "\n5. Develop characters and setting"
-            
-            prompt += "\n\nPlease provide the {content_type} without any additional commentary or notes."
-            
-            # Log the prompt and messages for debugging
-            logger.info(f"[LLM PROMPT] Full creative content prompt:\n{prompt}")
-            messages = [{"role": "user", "content": prompt}]
+            elif content_type == "essay":
+                prompt += "\n4. Include a clear introduction, body, and conclusion"
+                prompt += "\n5. Use evidence and logical reasoning to support arguments"
+            elif content_type == "blog post":
+                prompt += "\n4. Make it informative and engaging for online readers\n5. Use headings and subheadings for structure"
+            elif content_type == "song":
+                prompt += "\n4. Include verses and a chorus\n5. Use rhyme and rhythm where appropriate"
+            elif content_type == "script":
+                prompt += "\n4. Use dialogue and stage directions\n5. Clearly indicate characters and scenes"
+
+            prompt += f"\n\nPlease provide the {content_type} without any additional commentary or notes."
+
+            # Use creative template for all creative types, else use the user prompt directly
+            creative_types = ("poem", "story", "essay", "blog post", "song", "script", "letter", "speech", "report", "review", "analysis", "summary", "paper", "thesis", "dissertation")
+            if content_type in creative_types:
+                logger.info(f"[LLM PROMPT] Full creative content prompt:\n{prompt}")
+                messages = [{"role": "user", "content": prompt}]
+            else:
+                logger.info(f"[LLM PROMPT] Using user request as prompt: {description}")
+                messages = [{"role": "user", "content": description.strip()}]
+
             logger.info(f"[LLM MESSAGES] Messages object being sent: {messages}")
-            
-            # Use the LLM to generate the content
             try:
-                # Use the ask method to generate the content
                 response = await self.llm.ask(messages, stream=False, temperature=0.8)
-                
-                if response and len(response) > 0:
-                    logger.info(f"Successfully generated {content_type} of length {len(response)}")
-                    
-                    # If we have a task completer, update it with the generated content
-                    if self.task_completer and not self.task_completed:
-                        self.task_completer.add_information("content_type", content_type)
-                        self.task_completer.add_information("content_style", style)
-                        logger.info(f"Updated task completer with content type: {content_type}")
-                    
+                if response:
                     return response.strip()
                 else:
                     logger.warning(f"Empty response when generating content for: {description}")
                     return self._create_fallback_content(content_type, description)
-                    
             except Exception as e:
-                logger.error(f"Error calling LLM for content generation: {e}", exc_info=True)
-                return self._create_fallback_content(content_type, description)
-                
+                logger.error(f"Error generating creative content: {e}")
+                return "[Error generating content]"
         except Exception as e:
             logger.error(f"Error in _generate_creative_content: {e}", exc_info=True)
             return f"Error: Unable to generate content due to an error: {str(e)}"
-    
-    def _create_fallback_content(self, content_type: str, description: str) -> str:
-        """Create fallback content when generation fails."""
-        if content_type == "poem":
-            return """Verses flow like ancient streams,
-Words paint pictures, capture dreams.
-Thoughts and feelings intertwined,
-In rhythmic patterns, carefully designed."""
-        elif content_type == "story":
-            return """Once upon a time, in a world not unlike our own, a tale began to unfold. 
-Characters emerged from the mist of imagination, each with their own desires and challenges.
-Their journey would take them through valleys of despair and mountains of triumph."""
-        elif content_type == "essay":
-            return """Introduction:
-This essay explores the multifaceted dimensions of the subject at hand.
-
-Main Body:
-Various perspectives must be considered when examining this topic.
-Evidence suggests several key factors are at play.
-
-Conclusion:
-In summary, the complexity of this subject invites further exploration and discussion."""
-        else:
-            return f"This is a placeholder for the {content_type} about {description.split('about')[1].strip() if 'about' in description else description}."
 
     async def _handle_python_execute(self, command: ToolCall) -> str:
         """Special handler for python_execute: adds error handling wrapper."""
