@@ -401,8 +401,8 @@ class ImprovedManus(ToolCallAgent):
                     if target_filename:
                         logger.info(f"[CREATE FILENAME] Will save to: {target_filename}")
                     
-                    # Generate the content with target filename for direct saving
-                    content = await self._generate_creative_content(prompt, target_filename=target_filename)
+                    # Generate the content
+                    content = await self._generate_creative_content(prompt)
                     # Set the current task name for proper task completion
                     self.current_task = (
                         f"Create: {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
@@ -413,8 +413,24 @@ class ImprovedManus(ToolCallAgent):
 
                     if filename_match:
                         filename = filename_match.group(1).strip("\"'")
-                        # Full path already created in the _generate_creative_content method
-                        full_path = os.path.join(config.workspace_root, filename)
+                        # Use str_replace_editor tool to write the content
+                        if content and filename:
+                            full_path = os.path.join(config.workspace_root, filename)
+                            if not hasattr(self, '_file_written_paths'):
+                                self._file_written_paths = set()
+                            if full_path in self._file_written_paths:
+                                logger.warning(f"[CREATE HANDLER] File already written in this task: {full_path}. Skipping duplicate write.")
+                            else:
+                                logger.info(f"[CREATE HANDLER] Using str_replace_editor to save content to: {full_path}")
+                                tool_args = {
+                                    "command": "create",
+                                    "new_str": content,
+                                    "path": full_path
+                                }
+                                await self.available_tools.get_tool("str_replace_editor").execute(tool_args)
+                                self._file_written_paths.add(full_path)
+                        else:
+                            logger.warning(f"[CREATE HANDLER] No content or filename to save.")
 
                         # Set these properties for proper task result display
                         self.task_completed = True
@@ -2677,6 +2693,14 @@ Provide a concise, well-structured response. If the content doesn't answer the q
 
             # Handle create/write commands
             elif editor_command in ["create", "write"]:
+                # Guard: prevent overwriting with empty content
+                if (file_text is None or file_text == ""):
+                    if target_path.exists():
+                        logger.warning(f"[str_replace_editor] Attempted to {editor_command} '{target_path}' with empty content. File exists. Skipping to prevent blank overwrite.")
+                        return f"Skipped {editor_command} on '{target_path}': empty content and file exists."
+                    else:
+                        logger.warning(f"[str_replace_editor] Attempted to {editor_command} '{target_path}' with empty content. Not creating empty file.")
+                        return f"Skipped {editor_command} on '{target_path}': empty content."
                 try:
                     mode = (
                         "w"
