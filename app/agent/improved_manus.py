@@ -384,21 +384,25 @@ class ImprovedManus(ToolCallAgent):
                     f"[CREATE KEYWORD] Directly generating creative content for: {prompt}"
                 )
                 try:
-                    # Generate the content
-                    content = await self._generate_creative_content(prompt)
-
-                    # Check for filename in the prompt
+                    # Check for filename in the prompt BEFORE generating content
                     filename_match = re.search(
-                        r'save (?:to|as)\s*["\']([^"\']+)\s*["\']',
+                        r'save (?:to|as)\s*["''"]([^"''"]+)\s*["''"]',
                         prompt,
                         re.IGNORECASE,
                     )
                     if not filename_match:
                         # Try without quotes
                         filename_match = re.search(
-                            r"save (?:to|as)\s+([\w\-.\/\\]+)", prompt, re.IGNORECASE
+                            r"save (?:to|as)\s+([\w\-./\\]+)", prompt, re.IGNORECASE
                         )
-
+                    
+                    # Extract target filename if found
+                    target_filename = filename_match.group(1).strip() if filename_match else None
+                    if target_filename:
+                        logger.info(f"[CREATE FILENAME] Will save to: {target_filename}")
+                    
+                    # Generate the content with target filename for direct saving
+                    content = await self._generate_creative_content(prompt, target_filename=target_filename)
                     # Set the current task name for proper task completion
                     self.current_task = (
                         f"Create: {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
@@ -409,18 +413,8 @@ class ImprovedManus(ToolCallAgent):
 
                     if filename_match:
                         filename = filename_match.group(1).strip("\"'")
-                        # Create full path relative to workspace
+                        # Full path already created in the _generate_creative_content method
                         full_path = os.path.join(config.workspace_root, filename)
-                        # Make directory if it doesn't exist
-                        os.makedirs(
-                            os.path.dirname(os.path.abspath(full_path)), exist_ok=True
-                        )
-                        # Save the content
-                        with open(full_path, "w") as f:
-                            f.write(content)
-                        logger.info(
-                            f"[FILE SAVE] Creative content saved to: {full_path}"
-                        )
 
                         # Set these properties for proper task result display
                         self.task_completed = True
@@ -434,11 +428,8 @@ class ImprovedManus(ToolCallAgent):
                     else:
                         # No filename found, add to memory directly
                         self.task_completed = True
-                        self._task_result = (
-                            f"Creative content generated:\n{result_summary}"
-                        )
+                        self._task_result = f"Creative content generated:\n{result_summary}"
                         self._deliverable_content = content
-
                         # Update memory with task completion message
                         completion_message = f"✅ Here's the creative content you requested:\n\n{content}\n\nTask completed successfully! What would you like me to help you with next?"
                         self.update_memory("assistant", completion_message)
