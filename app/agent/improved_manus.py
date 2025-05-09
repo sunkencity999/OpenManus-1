@@ -53,6 +53,11 @@ class ImprovedManus(ToolCallAgent):
     system_prompt: str = IMPROVED_SYSTEM_PROMPT.format(directory=config.workspace_root)
     next_step_prompt: str = IMPROVED_NEXT_STEP_PROMPT
 
+    # Properties to store task results
+    _task_result: str = ""
+    _deliverable_content: str = ""
+    _deliverable_path: str = ""
+
     max_observe: int = 15000  # Increased observation length for web content
     max_steps: int = 10  # Default to a reasonable number of steps
     dynamic_steps: bool = True  # Enable dynamic step adjustment based on task complexity
@@ -298,12 +303,16 @@ class ImprovedManus(ToolCallAgent):
     async def cleanup(self):
         """Clean up ImprovedManus agent resources."""
         logger.info("Cleaning up ImprovedManus agent...")
+
+        # Clean up browser context if it exists
         if self.browser_context_helper:
-            await self.browser_context_helper.cleanup_browser()
+            logger.debug("Cleaning up browser context...")
+            await self.browser_context_helper.cleanup_browser()  # Use the correct cleanup method
             logger.info("Browser context cleaned up.")
 
         # Disconnect from all MCP servers
         if self.connected_servers:
+
             server_ids_to_disconnect = list(self.connected_servers.keys())
             logger.info(
                 f"Disconnecting from {len(server_ids_to_disconnect)} MCP servers..."
@@ -364,20 +373,26 @@ class ImprovedManus(ToolCallAgent):
         if keyword:
             logger.info(f"[KEYWORD ROUTING] Detected keyword: '{keyword}'. Routing explicitly.")
             self.conversation_memory.reset_for_new_task()
-            
+
             # Special handling for 'create:' keyword - directly generate creative content
             if keyword == "create":
                 logger.info(f"[CREATE KEYWORD] Directly generating creative content for: {prompt}")
                 try:
                     # Generate the content
                     content = await self._generate_creative_content(prompt)
-                    
+
                     # Check for filename in the prompt
                     filename_match = re.search(r'save (?:to|as)\s*["\']([^"\']+)\s*["\']', prompt, re.IGNORECASE)
                     if not filename_match:
                         # Try without quotes
                         filename_match = re.search(r'save (?:to|as)\s+([\w\-.\/\\]+)', prompt, re.IGNORECASE)
-                    
+
+                    # Set the current task name for proper task completion
+                    self.current_task = f"Create: {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
+
+                    # Store the content in memory for display in task result
+                    result_summary = f"\n---\n\n### Creative Content Generated\n\n```\n{content[:500]}\n```\n\n{'...[content truncated]...' if len(content) > 500 else ''}\n\n"
+
                     if filename_match:
                         filename = filename_match.group(1).strip('"\'')
                         # Create full path relative to workspace
@@ -388,18 +403,39 @@ class ImprovedManus(ToolCallAgent):
                         with open(full_path, 'w') as f:
                             f.write(content)
                         logger.info(f"[FILE SAVE] Creative content saved to: {full_path}")
-                        self.update_memory("assistant", f"I've written the content and saved it to '{filename}'.\n\n{content[:200]}... [content truncated]")
+
+                        # Set these properties for proper task result display
+                        self.task_completed = True
+                        self._task_result = f"Creative content generated and saved to {filename}\n{result_summary}"
+                        self._deliverable_content = content
+                        self._deliverable_path = full_path
+
+                        # Update memory with task completion message
+                        completion_message = f"✅ I've created your content and saved it to '{filename}'.\n\n{content[:200]}... [content truncated]\n\nTask completed successfully! What would you like me to help you with next?"
+                        self.update_memory("assistant", completion_message)
                     else:
                         # No filename found, add to memory directly
-                        self.update_memory("assistant", f"Here's the creative content you requested:\n\n{content}")
+                        self.task_completed = True
+                        self._task_result = f"Creative content generated:\n{result_summary}"
+                        self._deliverable_content = content
+
+                        # Update memory with task completion message
+                        completion_message = f"✅ Here's the creative content you requested:\n\n{content}\n\nTask completed successfully! What would you like me to help you with next?"
+                        self.update_memory("assistant", completion_message)
                 except Exception as e:
                     logger.error(f"[CREATE ERROR] Failed to generate creative content: {e}", exc_info=True)
-                    self.update_memory("assistant", f"I tried to create the content, but encountered an error: {str(e)}")
-                    
-                # Mark task as explicitly handled
+                    self.update_memory("assistant", f"I tried to create the content, but encountered an error: {str(e)}\n\nWhat would you like me to help you with instead?")
+                    self._task_result = f"Error generating content: {str(e)}"
+
+                # Mark task as explicitly handled to prevent task_completer from running
                 self._explicit_task_type = "completed"
+
+                # Create a dummy TaskCompleter but mark it as complete to prevent regeneration
+                self.task_completer = TaskCompleter(task=prompt)
+                self.task_completer._is_complete = True
+
                 return
-                
+
             # Regular keyword handling for other keywords
             self.task_completer = TaskCompleter(task=prompt)
             self._explicit_task_type = keyword
@@ -461,7 +497,7 @@ class ImprovedManus(ToolCallAgent):
                         logger.info(
                             f"Task analysis set required context: {required_context}"
                         )
-                    
+
                     # Adjust max_steps based on task complexity if dynamic_steps is enabled
                     if self.dynamic_steps:
                         # Base the number of steps on the plan complexity
@@ -476,7 +512,7 @@ class ImprovedManus(ToolCallAgent):
                         else:
                             # Allow up to 25 steps for complex tasks
                             self.max_steps = min(25, max(15, num_steps * 3))
-                            
+
                         logger.info(f"Dynamically adjusted max_steps to {self.max_steps} based on task complexity")
 
                     logger.info(f"📋 Task plan created with {len(plan.steps)} steps:")
@@ -564,15 +600,15 @@ class ImprovedManus(ToolCallAgent):
             if question:
                 # Check for important keywords that indicate the question should always be asked
                 important_keywords = [
-                    "confirm", "verify", "approve", "permission", "prefer", "choice", "select", 
+                    "confirm", "verify", "approve", "permission", "prefer", "choice", "select",
                     "decide", "opinion", "want", "need", "should", "would you", "do you", "can you",
                     "provide", "overview", "structure", "details", "specifics", "requirements"
                 ]
-                
+
                 # Check if the question is a duplicate or semantically similar to recently asked questions
                 question_norm = question.strip().lower()
                 duplicate_or_similar = False
-                
+
                 # First check for exact duplicates
                 for prev_q in self.tool_tracker.asked_questions[-10:]:  # Check the last 10 questions
                     prev_norm = prev_q.strip().lower()
@@ -580,7 +616,7 @@ class ImprovedManus(ToolCallAgent):
                         logger.warning(f"Exact duplicate question detected: {question}")
                         duplicate_or_similar = True
                         break
-                
+
                 # If not an exact duplicate, check for semantic similarity
                 if not duplicate_or_similar:
                     for prev_q in self.tool_tracker.asked_questions[-10:]:
@@ -589,24 +625,24 @@ class ImprovedManus(ToolCallAgent):
                             logger.warning(f"Similar question detected (similarity: {similarity:.2f}): {question} vs {prev_q}")
                             duplicate_or_similar = True
                             break
-                
+
                 # Force asking the question if it contains important keywords AND is not a duplicate/similar
                 force_ask = any(keyword in question.lower() for keyword in important_keywords) and not duplicate_or_similar
-                
+
                 # Check for redundancy
                 is_redundant = self._is_redundant_question(question)
-                
+
                 # Record the question in the tool tracker if we're going to ask it
                 if not is_redundant or force_ask:
                     self.tool_tracker.record_question(question)
-                
+
                 # Skip redundant questions unless we're forcing them
                 if is_redundant and not force_ask:
                     # Check if we've been asking the same question repeatedly
                     # If so, we should just ask it anyway to break the loop
-                    repeated_count = sum(1 for q in self.tool_tracker.asked_questions[-10:] 
+                    repeated_count = sum(1 for q in self.tool_tracker.asked_questions[-10:]
                                        if self._calculate_similarity(q, question) > 0.8)
-                    
+
                     if repeated_count >= 3:
                         logger.warning(f"Question '{question}' has been filtered multiple times. Forcing it to break potential loop.")
                     else:
@@ -634,10 +670,10 @@ class ImprovedManus(ToolCallAgent):
                         )
                         # Execute the suggested tool using this same execute_tool flow (recursive but safe due to checks)
                         return await self.execute_tool(suggested_command)
-                        
+
                 if force_ask:
                     logger.info(f"🔑 Forcing important question: {question}")
-                    
+
             # If no suggestion or not a question, proceed with SmartAskHuman via super().execute_tool
 
         # --- Standard Tool Execution via Base Class ---
@@ -885,7 +921,7 @@ class ImprovedManus(ToolCallAgent):
                         source="browser",
                         tags=["web_content", "visited_url", url],
                     )
-                    
+
                     # Process for task relevance - enhanced for creative tasks
                     if self.task_completer and hasattr(self.task_completer, 'task_type'):
                         task_type = self.task_completer.task_type or ""
@@ -894,30 +930,30 @@ class ImprovedManus(ToolCallAgent):
                             # Extract key facts and details
                             key_facts = []
                             soup = BeautifulSoup(extracted_content, 'html.parser')
-                            
+
                             # Extract title if available
                             title = soup.title.string if soup.title else ""
                             if title and len(title) < 150:  # Reasonable title length
                                 key_facts.append(f"Title: {title.strip()}")
-                            
+
                             # Extract key sections
                             section_headers = ["early life", "biography", "achievements", "legacy", "personal life"]
                             for header in section_headers:
                                 section = self._extract_section(extracted_content, header)
                                 if section and len(section) > 50:  # Only include meaningful sections
                                     key_facts.append(f"{header.title()}: {section}")
-                            
+
                             # Extract important dates
                             years = re.findall(r'\b(?:19|20)\d{2}\b', extracted_content)
                             if years:
                                 key_facts.append(f"Key years: {', '.join(sorted(set(years)))}")
-                            
+
                             # Add to task completer if we found useful information
                             if key_facts:
                                 facts_text = "\n".join(key_facts)
                                 self.task_completer.add_information("key_facts", facts_text)
                                 logger.info(f"Extracted {len(key_facts)} key facts for creative content")
-                    
+
                     # Process for general task relevance
                     self._process_content_for_task(url, extracted_content)
                     final_content = extracted_content  # Use extracted content for observation
@@ -969,21 +1005,21 @@ class ImprovedManus(ToolCallAgent):
             return f"Error: Browser action `{action}` failed: {str(e)}"
 
     async def enhanced_web_research(
-        self, 
-        query: str, 
+        self,
+        query: str,
         max_sites: int = 3,
         min_content_length: int = 500,
         max_content_length: int = 10000
     ) -> Dict[str, Any]:
         """
         Enhanced web research with better content processing and storage.
-        
+
         Args:
             query: The search query
             max_sites: Maximum number of sites to visit
             min_content_length: Minimum content length to consider
             max_content_length: Maximum content length to process
-            
+
         Returns:
             Dict containing research results and metadata
         """
@@ -995,30 +1031,30 @@ class ImprovedManus(ToolCallAgent):
             'start_time': time.time(),
             'status': 'in_progress'
         }
-        
+
         try:
             # Step 1: Perform initial search
             logger.info(f"🔎 Searching for: {query}")
             search_results = await self.perform_web_research(query, max_sites)
-            
+
             if not search_results or 'sources' not in search_results:
                 research_results['status'] = 'no_results'
                 logger.warning("No search results found")
                 return research_results
-            
+
             # Step 2: Process each search result
             for i, source in enumerate(search_results['sources'][:max_sites], 1):
                 try:
                     url = source.get('url', '')
                     if not url or url in [s.get('url') for s in research_results['sources']]:
                         continue
-                        
+
                     logger.info(f"🌐 Visiting source {i}/{min(max_sites, len(search_results['sources']))}: {url}")
-                    
+
                     # Navigate to the URL
                     await self.execute_browser_use("go_to_url", url=url)
                     await asyncio.sleep(2)  # Allow page to load
-                    
+
                     # Extract content
                     browser_tool = self.available_tools.get_tool("browser_use")
                     if not browser_tool:
@@ -1047,31 +1083,31 @@ class ImprovedManus(ToolCallAgent):
                             logger.error(f"[FILE SAVE ERROR] Could not save file '{filename}': {file_err}")
 
                         query=query
-                    
+
                     # Process for task relevance
                     if self.task_completer:
                         self._process_content_for_task(url, content)
-                    
+
                     # Add to context memory
                     self.add_to_context(
                         f"Content from {url} (truncated):\n{content[:1000]}...",
                         source="web_research",
                         tags=["web_content", "research", url]
                     )
-                    
+
                 except Exception as e:
                     logger.error(f"Error processing {url}: {str(e)}", exc_info=True)
                     continue
-            
+
             research_results['status'] = 'completed'
             research_results['end_time'] = time.time()
             research_results['duration'] = research_results['end_time'] - research_results['start_time']
-            
+
             logger.info(f"✅ Research completed. Processed {len(research_results['sources'])} sources, "
                        f"total {research_results['total_content_length']} characters")
-            
+
             return research_results
-            
+
         except Exception as e:
             research_results['status'] = 'error'
             research_results['error'] = str(e)
@@ -1082,7 +1118,7 @@ class ImprovedManus(ToolCallAgent):
         self, query: str, max_sites: int = 4
     ) -> Dict[str, Any]:
         """Perform web research: Search (DDG HTML) -> Extract URLs -> Visit -> Extract Content -> Analyze.
-        
+
         Returns:
             Dict containing search results and sources
         """
@@ -1135,7 +1171,7 @@ class ImprovedManus(ToolCallAgent):
                         match = re.search(r'"interactive_elements":\s*"(.+?)"', state_text, re.DOTALL)
                         if match:
                             interactive_elements = match.group(1).replace('\\n', '\n')
-                    
+
                     # Extract URLs from the interactive elements section
                     extracted_urls = []
                     if interactive_elements:
@@ -1148,20 +1184,20 @@ class ImprovedManus(ToolCallAgent):
                             r'https?://([\w.-]+\.[\w]{2,}/[^\s>"]+)', # URLs in text
                             r'([\w.-]+\.[\w]{2,}/[^\s>"]+)' # Domain with path in text
                         ]
-                        
+
                         for pattern in url_patterns:
                             for match in re.finditer(pattern, interactive_elements):
                                 url = match.group(1).strip()
                                 if not url.startswith('http'):
                                     url = f"https://{url}"
                                 extracted_urls.append(url)
-                        
+
                         # Also look for URLs in the numbered links [X]<a url>
                         numbered_links = re.finditer(r'\[(\d+)\]<a\s+([^/]+)/>', interactive_elements)
                         for match in numbered_links:
                             index = match.group(1)
                             link_text = match.group(2).strip()
-                            
+
                             # Look for the corresponding URL that might appear after this link
                             # Often in format [X]<a www.example.com/>
                             if re.match(r'^[\w.-]+\.[\w]{2,}', link_text):
@@ -1169,19 +1205,19 @@ class ImprovedManus(ToolCallAgent):
                                     extracted_urls.append(f"https://{link_text}")
                                 else:
                                     extracted_urls.append(link_text)
-                    
+
                     # If we didn't find URLs in the interactive elements, try general regex
                     if not extracted_urls:
                         all_urls = self._extract_urls(state_text)
                         extracted_urls = all_urls
-                    
+
                     # Filter out DuckDuckGo internal URLs and image/document files
                     urls_to_visit = [
                         url for url in extracted_urls
                         if "duckduckgo.com" not in url
                         and not url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf"))
                     ]
-                    
+
                     logger.info(f"Extracted {len(urls_to_visit)} URLs directly from browser state.")
                     search_page_html = state_text  # Keep the state text for fallback parsing
                 else:
@@ -1297,16 +1333,16 @@ class ImprovedManus(ToolCallAgent):
             max_retries = 2  # Number of retries for each URL
             retry_count = 0
             success = False
-            
+
             while retry_count <= max_retries and not success:
                 try:
                     if retry_count > 0:
                         logger.info(f"Retry attempt {retry_count} for URL: {url}")
-                        
+
                     # execute_browser_use handles navigation, overlays, extraction
                     # It returns the observation string which includes the content or error
                     observation = await self.execute_browser_use("go_to_url", url=url)
-                    
+
                     # Check if we got a timeout or connection error that might benefit from a retry
                     if "timeout" in observation.lower() or "connection" in observation.lower() or "failed to load" in observation.lower():
                         if retry_count < max_retries:
@@ -1314,17 +1350,17 @@ class ImprovedManus(ToolCallAgent):
                             retry_count += 1
                             time.sleep(2)  # Wait before retry
                             continue
-                    
+
                     # Extract content from the observation string if successful
                     if observation.startswith("Observed output") and not observation.startswith("Error:"):
                         # Extract content after the preamble
                         content_part = observation.split("executed:\n", 1)[-1]
-                        
+
                         # Check if we got meaningful content
                         if content_part and len(content_part.strip()) > 100:
                             if not content_part.startswith("Visited") and "extract significant content" not in content_part:
                                 logger.info(f"Successfully retrieved content for {url}, length: {len(content_part)}")
-                                
+
                                 # Store the content with the URL
                                 processed_content.append({"url": url, "content": content_part})
                                 visited_count += 1
@@ -1338,12 +1374,12 @@ class ImprovedManus(ToolCallAgent):
                                         # Get the current page state which should include the HTML
                                         browser_tool = self.available_tools.get_tool("browser_use")
                                         state_result = await browser_tool.get_current_state()
-                                        
+
                                         if state_result and not state_result.error:
                                             # Extract the HTML and process it directly
                                             html_content = str(state_result.output)
                                             extracted_content = self._extract_main_content(html_content)
-                                            
+
                                             if extracted_content and len(extracted_content) > 200:
                                                 logger.info(f"Successfully extracted content directly from HTML for {url}")
                                                 processed_content.append({"url": url, "content": extracted_content})
@@ -1379,7 +1415,7 @@ class ImprovedManus(ToolCallAgent):
                         else:
                             logger.warning(f"Skipping URL {url} after {max_retries} failed attempts. Last error: {observation[:200]}")
                             success = True  # Mark as done to move on
-                
+
                 except Exception as e:
                     if retry_count < max_retries:
                         logger.error(f"Exception processing URL {url}: {e}, will retry")
@@ -1388,7 +1424,7 @@ class ImprovedManus(ToolCallAgent):
                     else:
                         logger.error(f"Critical error processing URL {url} after {max_retries} retries: {e}")
                         success = True  # Mark as done to move on
-            
+
             # Add a delay between URLs to avoid rate limiting
             if i < len(urls_to_visit) - 1:
                 time.sleep(2)  # Slightly longer delay between URLs
@@ -1425,25 +1461,25 @@ class ImprovedManus(ToolCallAgent):
             logger.info(f"Using Bing fallback search for query: '{query}'")
             search_query_encoded = requests.utils.quote(query)
             bing_url = f"https://www.bing.com/search?q={search_query_encoded}"
-            
+
             # Navigate to Bing with our stealth techniques (user agent rotation is handled by execute_browser_use)
             await self.execute_browser_use('go_to_url', url=bing_url)
-            
+
             # Apply stealth techniques
             await self._apply_stealth_techniques(url=bing_url)
-            
+
             # Handle potential overlays
             await self._handle_website_overlays()
-            
+
             # Add a delay to let the page load
             time.sleep(2)
-            
+
             # Get the browser state which should include the page content
             browser_tool = self.available_tools.get_tool("browser_use")
             if not browser_tool:
                 logger.error("BrowserUseTool not found.")
                 return []
-                
+
             # Get the current page state
             state_result = await browser_tool.get_current_state()
             if state_result and not state_result.error:
@@ -1621,7 +1657,7 @@ class ImprovedManus(ToolCallAgent):
                 ".blog-post", ".news-article", ".text-content", ".main-text",
                 ".document-content", ".cms-content", ".rich-text", ".markdown-body"
             ]
-            
+
             # Try each selector and pick the one with substantial content
             for selector in selectors:
                 try:
@@ -1645,7 +1681,7 @@ class ImprovedManus(ToolCallAgent):
                 largest_container = None
                 max_len = 0
                 min_content_length = 500  # Minimum text length to consider
-                
+
                 # Check div and section elements for large text blocks
                 for tag in soup.find_all(["div", "section", "article", "main"]):
                     try:
@@ -1653,21 +1689,21 @@ class ImprovedManus(ToolCallAgent):
                         skip_classes = ["nav", "menu", "sidebar", "footer", "header", "comment"]
                         if any(cls in (tag.get("class", []) or []) for cls in skip_classes):
                             continue
-                            
+
                         text = tag.get_text(strip=True)
                         text_len = len(text)
-                        
+
                         if text_len > max_len and text_len > min_content_length:
                             # Calculate text in links to avoid navigation-heavy sections
                             links_text_len = sum(len(a.get_text(strip=True)) for a in tag.find_all("a"))
-                            
+
                             # Good content should have a low percentage of text in links
                             if links_text_len < text_len * 0.5:
                                 max_len = text_len
                                 largest_container = tag
                     except Exception as e:
                         logger.debug(f"Error processing tag {tag.name}: {e}")
-                        
+
                 if largest_container:
                     main_content_element = largest_container
                     logger.info(f"Found main content using largest text container (length: {max_len})")
@@ -1679,7 +1715,7 @@ class ImprovedManus(ToolCallAgent):
                     text = p.get_text(strip=True)
                     if len(text) > 50:  # Only paragraphs with substantial content
                         paragraphs.append(text)
-                
+
                 if paragraphs:
                     logger.info(f"Extracted {len(paragraphs)} paragraphs with substantial content")
                     return "\n\n".join(paragraphs)[: self.max_observe]
@@ -1697,12 +1733,12 @@ class ImprovedManus(ToolCallAgent):
             if main_content_element:
                 # Get text with newlines preserved for paragraph structure
                 text = main_content_element.get_text(separator="\n", strip=True)
-                
+
                 # Clean up the text
                 text = re.sub(r"\n\s*\n", "\n\n", text)  # Normalize multiple newlines
                 text = re.sub(r"\s{2,}", " ", text)  # Normalize multiple spaces
                 text = re.sub(r"(\n\s*){3,}", "\n\n", text)  # Limit consecutive newlines
-                
+
                 # Remove common noise patterns
                 noise_patterns = [
                     r"Cookie Policy", r"Privacy Policy", r"Terms of Service",
@@ -1711,7 +1747,7 @@ class ImprovedManus(ToolCallAgent):
                 ]
                 for pattern in noise_patterns:
                     text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-                
+
                 logger.info(f"Extracted text length: {len(text)}")
                 return text[: self.max_observe]  # Truncate before returning
             else:
@@ -1742,7 +1778,7 @@ class ImprovedManus(ToolCallAgent):
 
         try:
             cfg = config
-            
+
             # Get LLM settings from config
             llm_settings = None
             if hasattr(cfg, 'llm') and cfg.llm:
@@ -1760,14 +1796,14 @@ class ImprovedManus(ToolCallAgent):
                 else:
                     # config.llm is already the LLM settings object
                     llm_settings = cfg.llm
-            
+
             # Check if we have valid LLM settings and if it's Ollama
             api_type = None
             api_base = None
             model_name = None
             temperature = 0.0
             max_tokens = 4096
-            
+
             if isinstance(llm_settings, dict):
                 api_type = llm_settings.get('api_type', '').lower()
                 api_base = llm_settings.get('base_url')
@@ -1780,17 +1816,17 @@ class ImprovedManus(ToolCallAgent):
                 model_name = getattr(llm_settings, 'model', None)
                 temperature = getattr(llm_settings, 'temperature', 0.0)
                 max_tokens = getattr(llm_settings, 'max_tokens', 4096)
-            
+
             # Verify it's Ollama with all required settings
             if api_type != 'ollama' or not api_base or not model_name:
                 logger.error(f"Ollama configuration missing or incomplete: api_type={api_type}, base_url={api_base}, model={model_name}")
                 return "Error: Ollama analysis configuration is missing or incomplete."
-            
+
             # Adjust the API base URL if it contains '/v1' (OpenAI-style versioning)
             if '/v1' in api_base:
                 api_base = api_base.replace('/v1', '')
                 logger.info(f"Adjusted API base URL for Ollama: {api_base}")
-                
+
             api_base = api_base.rstrip("/")
             ollama_url = f"{api_base}/api/generate"
             logger.info(
@@ -2033,22 +2069,22 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         """Extract all URLs from the given text using robust regex patterns."""
         if not text:
             return []
-            
+
         # Standard http/https URLs pattern
         url_pattern = r'https?://[^\s()<>]+'
-        
+
         # Also look for www. URLs without http/https
         www_pattern = r'\b(www\.[^\s()<>]+\.[a-zA-Z]{2,})'
-        
+
         # Combine results from both patterns
         urls = re.findall(url_pattern, text)
         www_urls = re.findall(www_pattern, text)
-        
+
         # Process www URLs to add https:// prefix
         for www_url in www_urls:
             if www_url.startswith('www.'):
                 urls.append('https://' + www_url)
-        
+
         # Basic validation and deduplication while preserving order
         seen = set()
         valid_urls = []
@@ -2063,7 +2099,7 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     seen.add(url)
             except Exception as e:
                 logger.debug(f"Error processing URL {url}: {e}")
-                
+
         return valid_urls
 
     def _should_use_browser(self, user_message: str) -> bool:
@@ -2113,59 +2149,59 @@ Provide a concise, well-structured response. If the content doesn't answer the q
 
     def _calculate_similarity(self, str1: str, str2: str) -> float:
         """Calculate similarity between two strings.
-        
+
         This is a simple implementation using word overlap.
-        
+
         Args:
             str1: First string
             str2: Second string
-            
+
         Returns:
             Similarity score between 0 and 1
         """
         # Normalize strings
         str1 = str1.lower().strip()
         str2 = str2.lower().strip()
-        
+
         # Simple word overlap similarity
         words1 = set(str1.split())
         words2 = set(str2.split())
-        
+
         if not words1 or not words2:
             return 0.0
-            
+
         overlap = len(words1.intersection(words2))
         union = len(words1.union(words2))
-        
+
         return overlap / union if union > 0 else 0.0
-    
+
     def _is_redundant_question(self, question: str) -> bool:
         """Check if a question is redundant based on conversation history."""
         if not self._prevent_repeated_questions:
             return False
-            
+
         question_norm = question.strip().lower()
-        
+
         # First check for exact matches (highest priority)
         for prev_question in self.tool_tracker.asked_questions:
             prev_norm = prev_question.strip().lower()
             if question_norm == prev_norm:
                 logger.warning(f"🔄 Avoiding exactly repeated question: {question}")
                 return True
-                
+
         # Check for semantic similarity with recent questions
         # Only check the last 10 questions to avoid false positives with older questions
         recent_questions = self.tool_tracker.asked_questions[-10:] if len(self.tool_tracker.asked_questions) > 10 else self.tool_tracker.asked_questions
-        
+
         for prev_question in recent_questions:
             # Calculate similarity
             similarity = self._calculate_similarity(question, prev_question)
-            
+
             # If very similar (80%+ overlap), consider it redundant
             if similarity > 0.8:
                 logger.warning(f"🔄 Avoiding similar question (similarity: {similarity:.2f}): {question}")
                 return True
-                
+
             # For moderately similar questions (60-80% overlap), check if they have the same intent
             if similarity > 0.6:
                 # Extract question words (what, who, when, where, why, how)
@@ -2173,12 +2209,12 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                 import re
                 q_words_question = set(re.findall(q_words_pattern, question_norm))
                 q_words_prev = set(re.findall(q_words_pattern, prev_norm))
-                
+
                 # If they have the same question words, they likely have the same intent
                 if q_words_question and q_words_prev and q_words_question == q_words_prev:
                     logger.warning(f"🔄 Avoiding question with same intent: {question}")
                     return True
-                    
+
         # If we get here, the question is not redundant
         return False
 
@@ -2230,21 +2266,21 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             path_str = args.get("path", "")
             editor_command = args.get("command", "").lower()
             file_text = args.get("file_text", "")
-            
+
             if not path_str:
                 # Generate a default path if none provided
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 path_str = f"workspace/document_{timestamp}.txt"
                 args["path"] = path_str
                 command.function.arguments = json.dumps(args)
-            
+
             target_path = Path(path_str)
             if not target_path.is_absolute():
                 target_path = Path(config.workspace_root) / path_str
 
             # Create parent directories if they don't exist
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Check for creative content generation before file operations
             is_creative_content = editor_command == "create" and file_text and self._is_creative_content_description(file_text)
             if is_creative_content:
@@ -2256,13 +2292,13 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     args["file_text"] = file_text
                     command.function.arguments = json.dumps(args)
                     logger.info(f"Successfully generated creative content")
-                    
+
                     # Update task completer if available
                     if self.task_completer and not self.task_completed:
                         self.task_completer.add_information("content_generated", True)
                         self.task_completer.add_information("generated_content", file_text)
                         logger.info("Updated task completer with generated content")
-            
+
             # Handle different editor commands
             if editor_command == "view":
                 if not target_path.exists():
@@ -2285,29 +2321,29 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                         return f"File content:\n{content}"
                     except Exception as e:
                         return f"Error reading file: {str(e)}"
-            
+
             # Handle create/write commands
             elif editor_command in ["create", "write"]:
                 try:
                     mode = 'w' if editor_command == "create" or not target_path.exists() else 'a'
                     with open(target_path, mode, encoding='utf-8') as f:
                         f.write(file_text)
-                    
+
                     action = "Created" if mode == 'w' else "Updated"
                     logger.info(f"✅ {action} file: {target_path}")
-                    
+
                     # If this was a creative content task, mark it as complete
                     if is_creative_content and self.task_completer and not self.task_completed:
                         self.task_completed = True
                         logger.info(f"Marked task as complete after saving creative content to {target_path}")
-                    
+
                     # Record successful tool usage
                     args_with_message = args.copy()
                     args_with_message["message"] = f"{action} file successfully"
                     self.tool_tracker.record_tool_usage(
                         "str_replace_editor", args_with_message, "success"
                     )
-                    
+
                     # Return success message with file path and preview
                     preview = file_text[:200] + ("..." if len(file_text) > 200 else "")
                     result_msg = (
@@ -2315,29 +2351,29 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                         f"{action} file successfully at: {path_str}\n\n"
                         f"Preview:\n{preview}"
                     )
-                    
+
                     # Add completion message for creative content
                     if is_creative_content:
                         result_msg += "\n\n✅ Creative content generated and saved successfully!"
-                        
+
                     return result_msg
-                    
+
                 except Exception as e:
                     error_msg = f"Failed to write to file {target_path}: {str(e)}"
                     logger.error(error_msg, exc_info=True)
-                    
+
                     # Update task completer with error if this was a creative content task
                     if is_creative_content and self.task_completer:
                         self.task_completer.add_information("content_generation_error", error_msg)
                         logger.error("Recorded content generation error in task completer")
-                    
+
                     # Record tool usage with error
                     args_with_message = args.copy()
                     args_with_message["message"] = f"Failed to write to file: {str(e)}"
                     self.tool_tracker.record_tool_usage(
                         "str_replace_editor", args_with_message, "failure"
                     )
-                    
+
                     # Return detailed error message
                     return (
                         f"Error executing str_replace_editor: Failed to write to file '{path_str}'.\n"
@@ -2355,7 +2391,7 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                     args["file_text"] = file_text
                     command.function.arguments = json.dumps(args)
                     logger.info("Successfully generated creative content in fallback")
-                    
+
                     # Update task completer if available
                     if self.task_completer and not self.task_completed:
                         self.task_completer.add_information("content_generated", True)
@@ -2386,14 +2422,14 @@ Provide a concise, well-structured response. If the content doesn't answer the q
                 "str_replace_editor", arg_info, "failure", f"Outer handler error: {str(e)}"
             )
             return f"Error handling str_replace_editor: Unexpected error. {str(e)}"
-            
+
     def _is_creative_content_description(self, text: str) -> bool:
         """Determine if the text is a description of creative content that needs to be generated."""
         if not text or len(text.strip()) < 10:  # Skip very short texts
             return False
-            
+
         text_lower = text.lower().strip()
-        
+
         # Check for common patterns that indicate a creative content description
         creative_indicators = [
             # Essay patterns
@@ -2401,48 +2437,48 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             "write an", "create an", "compose an", "draft an", "generate an",
             "essay about", "essay on", "long-form essay", "academic paper",
             "research paper", "article about", "blog post", "write about",
-            
+
             # Other creative content types
             "poem about", "in the style of", "story about", "song about",
             "script for", "letter to", "speech about", "report on",
             "review of", "analysis of", "summary of"
         ]
-        
+
         # Check for content type indicators
         content_types = [
             "essay", "article", "story", "poem", "song", "script",
             "letter", "speech", "report", "review", "analysis", "summary",
             "blog post", "paper", "thesis", "dissertation"
         ]
-        
+
         # Check for task verbs
         task_verbs = [
             "write", "create", "compose", "draft", "generate",
             "develop", "produce", "prepare", "construct", "formulate"
         ]
-        
+
         # Check for length indicators
         length_indicators = [
             "long-form", "detailed", "comprehensive", "in-depth",
             "thorough", "extensive", "lengthy", "brief"
         ]
-        
+
         # Check for any creative indicators
         has_creative_indicator = any(indicator in text_lower for indicator in creative_indicators)
-        
+
         # Check for content type + task verb pattern
         has_content_task_pattern = any(
             (f"{verb} {content}" in text_lower or f"{verb} a {content}" in text_lower)
             for verb in task_verbs
             for content in content_types
         )
-        
+
         # Check for length indicators
         has_length_indicator = any(indicator in text_lower for indicator in length_indicators)
-        
+
         # Check for question-like patterns
         is_question = text_lower.endswith("?")
-        
+
         # Consider it creative content if:
         # 1. It has explicit creative indicators, OR
         # 2. It has a content type + task verb pattern, AND
@@ -2450,11 +2486,52 @@ Provide a concise, well-structured response. If the content doesn't answer the q
         # Keyword override
         if hasattr(self, '_explicit_task_type') and self._explicit_task_type == 'research':
             return False
+    async def _research_subject(self, subject):
+        """Research a subject using search tools and return relevant background information."""
+        if not subject or len(subject.strip()) < 3:
+            return ""
+            
+        logger.info(f"Researching background information for: {subject}")
+        try:
+            # Try to use search_web tool if available
+            search_tool = self.available_tools.get_tool("search_web")
+            if search_tool:
+                logger.info(f"Using search_web tool to research: {subject}")
+                search_args = {"query": subject}
+                search_result = await search_tool.execute(search_args)
+                if search_result and not hasattr(search_result, 'error'):
+                    search_data = search_result.output if hasattr(search_result, 'output') else str(search_result)
+                    if search_data and len(search_data) > 10:
+                        logger.info(f"Found background information for {subject}")
+                        return search_data
+                    
+            # Use browser search as fallback
+            if self.browser_context_helper:
+                logger.info(f"Using browser to research: {subject}")
+                try:
+                    await self.browser_context_helper.search(subject)
+                    page_content = await self.browser_context_helper.get_page_content()
+                    if page_content and len(page_content) > 20:
+                        logger.info(f"Found browser-based information for {subject}")
+                        return page_content[:2000]  # Limit length to avoid token issues
+                except Exception as browser_error:
+                    logger.error(f"Browser research error: {browser_error}")
+                
+        except Exception as e:
+            logger.error(f"Error researching subject {subject}: {e}")
+            
+        return ""
+
+    def _create_fallback_content(self, content_type, description):
+        """Create fallback content when generation fails."""
+        logger.warning(f"Creating fallback content for {content_type}")
+        return f"# {content_type.title()} about {description}\n\n[Unable to generate content automatically]"
 
     async def _generate_creative_content(self, description: str) -> str:
         """Generate creative content based on the description. If 'save to' or 'save as' is present, save the result to the specified file."""
         try:
             logger.info(f"Generating creative content for: {description}")
+            content_type = "essay"  # Default type
 
             # Extract filename if present (save to/save as)
             filename = None
@@ -2464,98 +2541,132 @@ Provide a concise, well-structured response. If the content doesn't answer the q
             if filename_match:
                 filename = filename_match.group(1).strip('"\'')
 
-            # Extract content type and style
-            content_type = "essay"
-            style = None
-            desc_lower = description.lower()
-            if "poem" in desc_lower:
-                content_type = "poem"
-            elif "story" in desc_lower or "novel" in desc_lower or "short story" in desc_lower:
-                content_type = "story"
-            elif "song" in desc_lower or "lyrics" in desc_lower:
-                content_type = "song"
-            elif "script" in desc_lower or "screenplay" in desc_lower or "play" in desc_lower:
-                content_type = "script"
-            elif "letter" in desc_lower:
-                content_type = "letter"
-            elif "speech" in desc_lower:
-                content_type = "speech"
-            elif "report" in desc_lower:
-                content_type = "report"
-            elif "review" in desc_lower:
-                content_type = "review"
-            elif "analysis" in desc_lower:
-                content_type = "analysis"
-            elif "summary" in desc_lower:
-                content_type = "summary"
-            elif "blog post" in desc_lower or "blog" in desc_lower or "article" in desc_lower:
-                content_type = "blog post"
-            elif "paper" in desc_lower:
-                content_type = "paper"
-            elif "thesis" in desc_lower:
-                content_type = "thesis"
-            elif "dissertation" in desc_lower:
-                content_type = "dissertation"
+            # Extract clean description (remove save to file parts)
+            clean_description = description
+            if filename:
+                clean_description = re.sub(r'save (?:to|as)\s*["\']?[^"\'\.]+["\']?', '', clean_description, flags=re.IGNORECASE)
+
+            # Determine content type
+            desc_lower = clean_description.lower()
+            content_types = [
+                "poem", "essay", "story", "novel", "short story", "blog post", "article",
+                "song", "lyrics", "script", "screenplay", "play", "letter", "speech",
+                "report", "review", "analysis", "summary", "paper", "thesis", "dissertation"
+            ]
+
+            for ctype in content_types:
+                if ctype in desc_lower:
+                    content_type = ctype
+                    break
 
             # Check for style
-            style_match = re.search(r'in the style of (.+?)(?:\?|$)', description, re.IGNORECASE)
+            style = None
+            style_match = re.search(r'in the style of (.+?)(?:\.|,|;|$)', clean_description, re.IGNORECASE)
             if style_match:
                 style = style_match.group(1).strip()
 
-            # Clean the description
-            clean_description = description
-            if filename:
-                clean_description = re.sub(r'save (?:to|as)\s*["\']?[^"\']+["\']?', '', clean_description, flags=re.IGNORECASE)
-            if style:
-                clean_description = re.sub(r'in the style of .+?(?:\?|$)', '', clean_description, flags=re.IGNORECASE)
+            # Extract the main subjects to research
+            subjects = []
+            about_match = re.search(r'(?:about|on)\s+([^.,;!?]+)', clean_description, re.IGNORECASE)
+            if about_match:
+                subjects.append(about_match.group(1).strip())
+            else:
+                # Try to extract a subject from the description
+                words = clean_description.split()
+                if len(words) > 3 and content_type in clean_description:
+                    # Extract words after the content type
+                    content_idx = clean_description.lower().find(content_type)
+                    if content_idx != -1:
+                        remaining = clean_description[content_idx + len(content_type):].strip()
+                        # Try to get a reasonable subject
+                        if remaining:
+                            subjects.append(remaining.split('.')[0].strip())
 
-            # Create a more detailed prompt for the LLM
-            prompt = f"""I need you to create a {content_type} based on the following description:\n\n{clean_description}\n\nGuidelines:\n1. Focus on the main topic: {clean_description}\n2. Create a {content_type} that is engaging and well-structured"""
+            # Default creative temperature
+            temperature = 0.7
 
+            # Research background information for subjects
+            background_info = ""
+            for subject in subjects:
+                if not subject:
+                    continue
+
+                logger.info(f"Researching background information for: {subject}")
+                try:
+                    # Use web search to get contextual information
+                    search_tool = self.available_tools.get_tool("search_web")
+                    if search_tool:
+                        logger.info(f"Using search_web tool to research: {subject}")
+                        search_args = {"query": subject}
+                        search_result = await search_tool.execute(search_args)
+                        if search_result and not hasattr(search_result, 'error'):
+                            search_data = search_result.output if hasattr(search_result, 'output') else str(search_result)
+                            if search_data and len(search_data) > 10:
+                                background_info += f"\n\nBackground information about {subject}:\n{search_data}"
+                                logger.info(f"Found background information for {subject}")
+                except Exception as e:
+                    logger.error(f"Error searching for information: {e}")
+
+            # Create prompt based on content type
+            prompt = f"I need you to create a {content_type} based on the following description:\n\n{clean_description}\n\nGuidelines:\n1. Focus on the main topic: {clean_description}\n2. Create a {content_type} that is engaging and well-structured"
+
+            # Add style guidelines if provided
             if style:
                 prompt += f"\n3. Write in the style of {style}"
-            if content_type == "poem":
-                prompt += "\n4. Use poetic devices like metaphor, simile, and imagery"
-                prompt += "\n5. Pay attention to rhythm and flow"
-            elif content_type == "story":
-                prompt += "\n4. Include a clear beginning, middle, and end"
-                prompt += "\n5. Develop characters and setting"
-            elif content_type == "essay":
-                prompt += "\n4. Include a clear introduction, body, and conclusion"
-                prompt += "\n5. Use evidence and logical reasoning to support arguments"
-            elif content_type == "blog post":
-                prompt += "\n4. Make it informative and engaging for online readers\n5. Use headings and subheadings for structure"
-            elif content_type == "song":
-                prompt += "\n4. Include verses and a chorus\n5. Use rhyme and rhythm where appropriate"
-            elif content_type == "script":
+
+            # Add content-specific guidelines
+            if content_type in ["poem", "song", "lyrics"]:
+                prompt += "\n4. Use poetic devices like metaphor, simile, and imagery\n5. Pay attention to rhythm and flow"
+                temperature = 0.8  # Higher temperature for poetry
+            elif content_type in ["essay", "article", "report", "analysis", "paper", "thesis", "dissertation"]:
+                prompt += "\n4. Include a clear introduction, body, and conclusion\n5. Use evidence and logical reasoning to support arguments"
+                temperature = 0.4  # Lower temperature for formal writing
+            elif content_type in ["story", "novel", "short story"]:
+                prompt += "\n4. Include a clear beginning, middle, and end\n5. Develop characters and setting"
+                temperature = 0.7  # Balanced temperature for stories
+            elif content_type in ["script", "screenplay", "play"]:
                 prompt += "\n4. Use dialogue and stage directions\n5. Clearly indicate characters and scenes"
+                temperature = 0.6  # Slightly lower for structured scripts
+
+            # Add background information if found
+            if background_info:
+                prompt += f"\n\n{background_info}"
 
             prompt += f"\n\nPlease provide the {content_type} without any additional commentary or notes."
 
-            # Use creative template for all creative types, else use the user prompt directly
-            creative_types = ("poem", "story", "essay", "blog post", "song", "script", "letter", "speech", "report", "review", "analysis", "summary", "paper", "thesis", "dissertation")
-            if content_type in creative_types:
-                logger.info(f"[LLM PROMPT] Full creative content prompt:\n{prompt}")
-                messages = [{"role": "user", "content": prompt}]
-            else:
-                logger.info(f"[LLM PROMPT] Using user request as prompt: {description}")
-                messages = [{"role": "user", "content": description.strip()}]
+            logger.info(f"[LLM PROMPT] Full creative content prompt:\n{prompt}")
 
+            # Generate content using Ollama - ensure we're using the right configuration
+            messages = [{"role": "user", "content": prompt}]
             logger.info(f"[LLM MESSAGES] Messages object being sent: {messages}")
+
             try:
-                response = await self.llm.ask(messages, stream=False, temperature=0.8)
-                if response:
-                    return response.strip()
+                # Use the LLM to generate content, configured for Ollama
+                response = await self.llm.ask(messages, stream=False, temperature=temperature)
+                content = response["content"] if isinstance(response, dict) and "content" in response else response
+                
+                # Verify we got actual content
+                if content and len(content.strip()) > 50:  # Reasonable minimum length for creative content
+                    logger.info(f"Successfully generated {content_type} with {len(content.split())} words")
+                    return content.strip()
                 else:
-                    logger.warning(f"Empty response when generating content for: {description}")
-                    return self._create_fallback_content(content_type, description)
+                    logger.warning(f"Generated content too short ({len(content.split()) if content else 0} words), retrying with different approach")
+                    
+                    # Try again with a simpler prompt
+                    simplified_prompt = f"Write a {content_type} about {clean_description}. Make it detailed and use {style if style else 'formal'} style."
+                    simplified_messages = [{"role": "user", "content": simplified_prompt}]
+                    logger.info(f"Attempting simplified prompt: {simplified_prompt}")
+                    
+                    response = await self.llm.ask(simplified_messages, stream=False, temperature=temperature)
+                    content = response["content"] if isinstance(response, dict) and "content" in response else response
+                    return content.strip()
             except Exception as e:
-                logger.error(f"Error generating creative content: {e}")
-                return "[Error generating content]"
+                logger.error(f"Error in LLM generation: {e}", exc_info=True)
+                return self._create_fallback_content(content_type, clean_description)
+
         except Exception as e:
             logger.error(f"Error in _generate_creative_content: {e}", exc_info=True)
             return f"Error: Unable to generate content due to an error: {str(e)}"
-
     async def _handle_python_execute(self, command: ToolCall) -> str:
         """Special handler for python_execute: adds error handling wrapper."""
         args = {}
@@ -2673,7 +2784,7 @@ except Exception as e:
         # 3. Creative Content Generation -> Generate directly using str_replace_editor
         if self._is_creative_content_description(question):
             logger.info("Creative content generation task detected. Generating content with str_replace_editor.")
-            
+
             # Check if we need to save to a specific file
             filename = None
             if "save to" in q_lower or "save it as" in q_lower:
@@ -2681,7 +2792,7 @@ except Exception as e:
                 save_match = re.search(r'save\s+(?:it\s+)?(?:to|as)[\s"\']+([^\s"\']+)', q_lower)
                 if save_match:
                     filename = save_match.group(1).strip('"\'')
-            
+
             # If no filename specified, generate one based on content type and topic
             if not filename:
                 content_type = "essay"
@@ -2689,21 +2800,21 @@ except Exception as e:
                     content_type = "poem"
                 elif "story" in q_lower:
                     content_type = "story"
-                    
+
                 # Extract the main topic for the filename
                 topic = "creative_content"
                 topic_match = re.search(r'(?:about|on|regarding|re:?)\s+(.+?)(?:\?|$)', question, re.IGNORECASE)
                 if topic_match:
                     topic = topic_match.group(1).strip()
-                    
+
                 # Create a clean filename
                 filename = f"{content_type}_{_slugify(topic)}.txt"
-            
+
             filepath = str(Path(config.workspace_root) / filename)
-            
+
             # Generate the content
             content = await self._generate_creative_content(question)
-            
+
             # If we have content, return the tool call to save it
             if content:
                 return {
@@ -2714,9 +2825,9 @@ except Exception as e:
                         "file_text": content
                     }
                 }
-            
+
             return None
-            
+
         # 4. Research/Information -> browser_use for web research
         research_keywords = [
             # Question words and phrases
@@ -2728,32 +2839,32 @@ except Exception as e:
             "details about", "facts about", "who was", "what are", "how many",
             "how much", "when did", "where did", "why did", "how did",
             "what caused", "what happened", "what makes", "what are the",
-            
+
             # How-to and instructional
             "how to use", "how to make", "how to create", "how to build",
             "how to install", "how to set up", "how to configure",
             "tutorial on", "guide to", "tips for", "best way to", "how can i",
-            
+
             # Information requests
             "what do you know about", "can you tell me about", "i need information on",
             "looking for information about", "search for", "find me", "show me"
         ]
-        
+
         # Check if this is a factual or research question
         is_research_question = (
-            (q_lower.endswith("?") or 
-             any(q_word in q_lower for q_word in ["what", "who", "when", "where", "why", "how"])) 
+            (q_lower.endswith("?") or
+             any(q_word in q_lower for q_word in ["what", "who", "when", "where", "why", "how"]))
             and len(question) > 5  # Reduced minimum length to catch more queries
             and any(kw in q_lower for kw in research_keywords)
         )
-        
+
         # Check for statements that are clearly researchable
         is_research_statement = (
-            not q_lower.endswith("?") 
+            not q_lower.endswith("?")
             and any(kw in q_lower for kw in ["find", "search", "look up", "research"])
             and any(kw in q_lower for kw in ["about", "on", "for"])
         )
-        
+
         # Enhanced historical figure mentions with variations and titles
         historical_figures = {
             # Leaders and rulers
@@ -2768,7 +2879,7 @@ except Exception as e:
             'george washington': ['president washington', 'general washington'],
             'queen elizabeth i': ['elizabeth i', 'queen elizabeth the first'],
             'queen elizabeth ii': ['elizabeth ii', 'queen elizabeth the second'],
-            
+
             # Scientists and inventors
             'albert einstein': ['einstein', 'albert einstein'],
             'marie curie': ['madame curie', 'marie sklodowska curie'],
@@ -2778,7 +2889,7 @@ except Exception as e:
             'nikola tesla': ['tesla', 'nikola tesla'],
             'galileo galilei': ['galileo', 'galileo galilei'],
             'stephen hawking': ['hawking', 'stephen hawking'],
-            
+
             # Artists and writers
             'leonardo da vinci': ['da vinci', 'leonardo'],
             'william shakespeare': ['shakespeare', 'the bard', 'shakespeare'],
@@ -2786,21 +2897,21 @@ except Exception as e:
             'vincent van gogh': ['van gogh', 'vincent gogh'],
             'wolfgang amadeus mozart': ['mozart', 'wolfgang mozart'],
             'ludwig van beethoven': ['beethoven', 'ludwig beethoven'],
-            
+
             # Philosophers and thinkers
             'socrates': ['socrates'],
             'plato': ['plato'],
             'aristotle': ['aristotle'],
             'confucius': ['kong fuzi', 'confucius'],
             'buddha': ['siddhartha gautama', 'gautama buddha', 'the buddha'],
-            
+
             # Religious figures
             'jesus christ': ['jesus', 'jesus of nazareth', 'jesus christ'],
             'prophet muhammad': ['muhammad', 'prophet muhammad', 'mohammed'],
             'mahatma gandhi': ['gandhi', 'mahatma gandhi', 'mohandas gandhi'],
             'martin luther': ['martin luther', 'martin luther king jr'],
             'martin luther king jr': ['mlk', 'dr martin luther king', 'martin luther king'],
-            
+
             # Modern figures
             'nelson mandela': ['mandela', 'nelson mandela'],
             'steve jobs': ['steve jobs', 'steven jobs'],
@@ -2810,20 +2921,20 @@ except Exception as e:
             'jeff bezos': ['bezos', 'jeff bezos'],
             'warren buffett': ['buffett', 'warren buffett']
         }
-        
+
         # Check for creative tasks about known figures/events
         is_creative_about_known = any(
-            phrase in q_lower 
+            phrase in q_lower
             for phrase in [
                 "create a", "write a", "compose a", "make a", "generate a",
                 "create an", "write an", "compose an", "make an", "generate an"
             ]
         )
-        
+
         # Check for direct historical figure questions
         is_historical_figure_question = False
         is_creative_writing = False
-        
+
         # Check for figure mentions in the question
         mentioned_figure = None
         for figure_name, variations in historical_figures.items():
@@ -2838,20 +2949,20 @@ except Exception as e:
                     break
             if mentioned_figure:
                 break
-        
+
         # If we found a figure, check the type of question
         if mentioned_figure:
             if any(q_lower.startswith(prefix) for prefix in ["who is", "who was", "what is"]) or \
                any(phrase in q_lower for phrase in ["tell me about", "information about"]):
                 is_historical_figure_question = True
-            
+
             if any(phrase in q_lower for phrase in [
                 "write a poem about", "compose a story about", "create a tale about",
                 "write an epic about", "create a narrative about", "compose a ballad about"
             ]):
                 is_creative_writing = True
                 is_creative_about_known = True
-        
+
         if any([
             is_research_question,
             is_research_statement,
@@ -2861,7 +2972,7 @@ except Exception as e:
         ]):
             # Extract key search terms from the question
             search_query = question.replace("?", "").strip()
-            
+
             # For certain types of questions, create a more specific search query
             if mentioned_figure:
                 # For known historical figures, create more targeted queries
@@ -2892,20 +3003,20 @@ except Exception as e:
                         search_query = f"{search_query} life story"
                     else:
                         search_query = f"{search_query} key information"
-            
+
             # Clean up the query
             search_query = re.sub(r'^(can you|please|could you|would you|i need|i want|find|search|look up|research|information on|about|on|for)', '', search_query, flags=re.IGNORECASE)
             search_query = re.sub(r'\s+', ' ', search_query).strip()
-            
+
             # For creative tasks, set up the task completer if needed
             if is_creative_about_known or is_creative_writing or is_historical_figure_question:
                 if not self.task_completer:
                     self.task_completer = TaskCompleter()
                     self.task_completer.task_type = "creative_writing"
-                    
+
                 # Use the mentioned figure if we found one, otherwise try to extract from query
                 subject = mentioned_figure if mentioned_figure else search_query
-                
+
                 # If we still don't have a subject, try to extract using patterns
                 if not subject or subject == search_query:
                     name_patterns = [
@@ -2915,20 +3026,20 @@ except Exception as e:
                         r"tell me about ([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})",
                         r"(.*?)(?:'s|')? (?:biography|life story|history)"
                     ]
-                    
+
                     for pattern in name_patterns:
                         match = re.search(pattern, question, re.IGNORECASE)
                         if match and match.group(1).strip():
                             potential_subject = match.group(1).strip()
                             # Check if the extracted name matches any known figure or variation
                             for figure_name, variations in historical_figures.items():
-                                if (potential_subject.lower() == figure_name.lower() or 
+                                if (potential_subject.lower() == figure_name.lower() or
                                     any(v.lower() == potential_subject.lower() for v in variations)):
                                     subject = figure_name
                                     break
                             if subject != search_query:
                                 break
-                
+
                 # Determine the type of creative task
                 task_type = "story"  # default
                 if "poem" in q_lower:
@@ -2937,11 +3048,11 @@ except Exception as e:
                     task_type = "narrative"
                 elif any(term in q_lower for term in ["song", "ballad"]):
                     task_type = "song"
-                
+
                 # Set up task completer with extracted information
                 self.task_completer.add_information("subject", subject)
                 self.task_completer.add_information("task_type", task_type)
-                
+
                 # Set tone based on the subject and task type
                 tone = "informative"
                 if any(term in q_lower for term in ["inspiring", "motivational"]):
@@ -2950,7 +3061,7 @@ except Exception as e:
                     tone = "dramatic"
                 elif any(term in q_lower for term in ["funny", "humorous", "comic"]):
                     tone = "humorous"
-                
+
                 # Set style based on the subject
                 style = "historical"
                 if any(term in q_lower for term in ["modern", "contemporary"]):
@@ -2959,38 +3070,43 @@ except Exception as e:
                     style = "fantasy"
                 elif any(term in q_lower for term in ["sci-fi", "futuristic"]):
                     style = "sci-fi"
-                
+
                 # Add all information to task completer
                 self.task_completer.add_information("tone", tone)
                 self.task_completer.add_information("style", style)
                 self.task_completer.add_information("original_request", question)
-                
+
                 # If we have a historical figure, add context about their time period
                 if mentioned_figure:
                     # Add time period context if available
                     time_period = self._get_time_period_for_figure(mentioned_figure)
                     if time_period:
                         self.task_completer.add_information("time_period", time_period)
-                    
+
                     # Add category (scientist, leader, artist, etc.)
                     category = self._get_category_for_figure(mentioned_figure)
                     if category:
                         self.task_completer.add_information("category", category)
-                
+
                 logger.info(f"Initialized task completer for {task_type} about: {subject}")
-                
+
                 # For creative tasks, generate content directly
                 if is_creative_about_known or is_creative_writing:
                     logger.info(f"Generating {task_type} about: {subject}")
-                    content = await self._generate_creative_content(f"A {task_type} about {subject} in the style of {tone} with a {style} style")
-                    
+                    # First try to get background information about the subject
+                    background_info = await self._research_subject(subject)
+                    creative_prompt = f"A {task_type} about {subject} in the style of {tone} with a {style} style"
+                    if background_info:
+                        creative_prompt += f"\n\nUse this background information: {background_info}"
+                    content = await self._generate_creative_content(creative_prompt)
+
                     # Save the content to the specified file if filename was provided
                     filename = "output.txt"  # Default filename
                     if "save it as" in q_lower:
                         match = re.search(r'save it as ["\']?([^"\'\s]+)["\']?', q_lower)
                         if match:
                             filename = match.group(1)
-                    
+
                     filepath = os.path.join(config.workspace_root, filename)
                     return {
                         "tool": "str_replace_editor",
@@ -3000,7 +3116,7 @@ except Exception as e:
                             "file_text": content
                         }
                     }
-                
+
                 # For non-creative tasks, perform research
                 if subject and len(subject.split()) <= 3:  # Basic check for a reasonable name
                     logger.info(f"Initiating research for: {subject}")
@@ -3042,7 +3158,7 @@ except Exception as e:
         logger.info("No specific better tool identified. Allowing ask_human.")
         return None
 
-    def add_to_context(
+def add_to_context(
         self,
         text: str,
         priority: str = "medium",
@@ -3072,7 +3188,7 @@ except Exception as e:
                     f"Failed to store context in persistent memory: {e}", exc_info=True
                 )
 
-    def _get_time_period_for_figure(self, figure_name: str) -> Optional[str]:
+def _get_time_period_for_figure(self, figure_name: str) -> Optional[str]:
         """Get the time period for a historical figure."""
         time_periods = {
             # Ancient
@@ -3084,11 +3200,11 @@ except Exception as e:
             'cleopatra': 'Hellenistic Period (1st century BCE)',
             'buddha': 'Ancient India (6th-5th century BCE)',
             'confucius': 'Ancient China (6th-5th century BCE)',
-            
+
             # Middle Ages
             'genghis khan': 'Middle Ages (12th-13th century)',
             'queen elizabeth i': 'Elizabethan Era (16th century)',
-            
+
             # Modern
             'isaac newton': 'Scientific Revolution (17th-18th century)',
             'wolfgang amadeus mozart': 'Classical Period (18th century)',
@@ -3103,7 +3219,7 @@ except Exception as e:
             'winston churchill': 'World War II era (mid 20th century)',
             'martin luther king jr': 'Civil Rights Movement (mid 20th century)',
             'stephen hawking': 'Late 20th - Early 21st century',
-            
+
             # Contemporary
             'steve jobs': 'Late 20th - Early 21st century',
             'bill gates': 'Late 20th - Early 21st century',
@@ -3112,10 +3228,10 @@ except Exception as e:
             'jeff bezos': '21st century',
             'warren buffett': 'Late 20th - Early 21st century'
         }
-        
+
         return time_periods.get(figure_name.lower())
-    
-    def _get_category_for_figure(self, figure_name: str) -> Optional[str]:
+
+def _get_category_for_figure(self, figure_name: str) -> Optional[str]:
         """Get the category (scientist, leader, etc.) for a historical figure."""
         categories = {
             # Leaders and rulers
@@ -3133,7 +3249,7 @@ except Exception as e:
             'nelson mandela': 'political leader',
             'mahatma gandhi': 'political leader',
             'martin luther king jr': 'civil rights leader',
-            
+
             # Scientists and inventors
             'albert einstein': 'scientist',
             'marie curie': 'scientist',
@@ -3143,7 +3259,7 @@ except Exception as e:
             'nikola tesla': 'inventor',
             'galileo galilei': 'scientist',
             'stephen hawking': 'scientist',
-            
+
             # Artists and writers
             'leonardo da vinci': 'artist',
             'william shakespeare': 'writer',
@@ -3151,19 +3267,19 @@ except Exception as e:
             'vincent van gogh': 'artist',
             'wolfgang amadeus mozart': 'composer',
             'ludwig van beethoven': 'composer',
-            
+
             # Philosophers and thinkers
             'socrates': 'philosopher',
             'plato': 'philosopher',
             'aristotle': 'philosopher',
             'confucius': 'philosopher',
             'buddha': 'spiritual leader',
-            
+
             # Religious figures
             'jesus christ': 'religious leader',
             'prophet muhammad': 'religious leader',
             'martin luther': 'religious leader',
-            
+
             # Modern figures
             'steve jobs': 'business leader',
             'bill gates': 'business leader',
@@ -3172,91 +3288,92 @@ except Exception as e:
             'jeff bezos': 'business leader',
             'warren buffett': 'business leader'
         }
-        
+
         return categories.get(figure_name.lower())
-    
-    @property
-    def context_manager(self):
-        """Provides access to PersistentMemory instance for context operations."""
-        if not self.conversation_memory:
-            logger.error(
-                "Context manager accessed before PersistentMemory initialized!"
+
+@property
+def context_manager(self):
+    """Provides access to PersistentMemory instance for context operations."""
+    if not self.conversation_memory:
+        logger.error(
+            "Context manager accessed before PersistentMemory initialized!"
             )
             # Attempt recovery - this might be too late depending on usage context
-            self.initialize_helper()
-            if not self.conversation_memory:
-                raise RuntimeError("PersistentMemory not initialized.")
+        self.initialize_helper()
+        if not self.conversation_memory:
+            raise RuntimeError("PersistentMemory not initialized.")
         return self.conversation_memory
 
-    async def think(self) -> bool:
-        """Enhanced thinking process with dynamic prompting and context awareness."""
-        logger.info(f"--- Starting think cycle (Step {self.step_count + 1}) ---")
-        self.step_count += 1  # Increment step counter
+async def think(self) -> bool:
+    """Enhanced thinking process with dynamic prompting and context awareness."""
+    logger.info(f"--- Starting think cycle (Step {self.step_count + 1}) ---")
+    self.step_count += 1  # Increment step counter
 
-        # Ensure agent is initialized (connects to MCP etc. on first think)
-        if not self._initialized:
-            await self.initialize_mcp_servers()
+    # Ensure agent is initialized (connects to MCP etc. on first think)
+    if not self._initialized:
+        await self.initialize_mcp_servers()
 
-        # --- Pre-computation & State Checks ---
-        # 1. Task Analysis on first user message
-        is_new_task_interaction = len(self.memory.messages) <= 2
-        if is_new_task_interaction and not self.current_task:
-            user_message = next(
-                (msg for msg in self.memory.messages if msg.role == "user"), None
+    # --- Pre-computation & State Checks ---
+    # 1. Task Analysis on first user message
+    is_new_task_interaction = len(self.memory.messages) <= 2
+    if is_new_task_interaction and not self.current_task:
+        user_message = next(
+            (msg for msg in self.memory.messages if msg.role == "user"), None
             )
-            if user_message and user_message.content:
-                await self.analyze_new_task(user_message.content)
+        if user_message and user_message.content:
+            await self.analyze_new_task(user_message.content)
 
-        # 2. Check for Task Completion Readiness
-        if (
-            self.task_completer
-            and self.task_completer.is_ready_to_complete()
-            and not self.task_completed
+    # 2. Check for Task Completion Readiness
+    if (
+        self.task_completer
+        and self.task_completer.is_ready_to_complete()
+        and not self.task_completed
         ):
-            logger.info("✅ Task completion criteria met. Generating deliverable...")
-            try:
-                self._add_default_information()  # Ensure defaults filled
-                deliverable = self.task_completer.create_deliverable()
-                file_path = self._save_deliverable_to_file(deliverable)
-                save_msg = (
-                    f"\nDeliverable saved to workspace: {file_path}"
-                    if file_path
-                    else ""
-                )
-                final_output = f"Task '{self.current_task}' completed.\n\nDeliverable:\n{deliverable}{save_msg}"
+        # Skip if we've already handled this through keyword routing
+        if hasattr(self, '_task_result') and self._task_result:
+            logger.info("✅ Task already completed via keyword routing.")
+            return False  # Continue processing
 
-                # Update memory and context, then mark completed
-                self.update_memory("assistant", final_output)
-                self.add_to_context(
-                    final_output,
-                    priority="high",
-                    source="task_completion",
-                    tags=["task_completed", "deliverable"],
+        logger.info("✅ Task completion criteria met. Generating deliverable...")
+        try:
+            self._add_default_information()  # Ensure defaults filled
+            deliverable = self.task_completer.create_deliverable()
+            file_path = self._save_deliverable_to_file(deliverable)
+            save_msg = (
+                f"\nDeliverable saved to workspace: {file_path}"
+                if file_path
+                else ""
                 )
-                self.task_completed = True
-                # After completing a task, prepare for the next one
-                logger.info("Task marked as completed. Ready for next task.")
-                
-                # Clear the current task and reset completion state
-                self.current_task = ""
-                self.task_completed = False
-                
-                # Clear the task completer to prepare for the next task
-                self.task_completer = None
-                
-                # Add a prompt for the next task
-                next_task_prompt = "\n\nTask completed successfully! What would you like me to help you with next?"
-                self.update_memory("assistant", next_task_prompt)
-                return False  # Continue processing
-            except Exception as e:
-                logger.error(f"Error during task completion/saving: {e}", exc_info=True)
-                self.add_to_context(
-                    f"Error finalizing task: {e}",
-                    priority="high",
-                    source="error",
-                    tags=["error", "task_completion"],
-                )
-                # Continue thinking cycle to report error
+            final_output = f"Task '{self.current_task}' completed.\n\nDeliverable:\n{deliverable}{save_msg}"
+
+            # Set task result for display
+            self._task_result = f"Task completed\n\n{deliverable}"
+            self._deliverable_content = deliverable
+            self._deliverable_path = file_path
+
+            # Update memory and context, then mark completed
+            self.update_memory("assistant", final_output)
+            self.add_to_context(
+                final_output,
+                priority="high",
+                source="task_completion",
+                tags=["task_completed", "deliverable"],
+            )
+            self.task_completed = True
+
+            # Add a prompt for the next task
+            next_task_prompt = "\n\nTask completed successfully! What would you like me to help you with next?"
+            self.update_memory("assistant", next_task_prompt)
+            return False  # Continue processing
+        except Exception as e:
+            logger.error(f"Error during task completion/saving: {e}", exc_info=True)
+            self.add_to_context(
+                f"Error finalizing task: {e}",
+                priority="high",
+                source="error",
+                tags=["error", "task_completion"],
+            )
+            # Continue thinking cycle to report error
 
         # --- Dynamic Prompt Construction ---
         base_prompt = self.next_step_prompt
@@ -3419,35 +3536,35 @@ except Exception as e:
     # Need to ensure all called helpers are defined.
     def _extract_section(self, content: str, section_name: str, max_paragraphs: int = 3) -> str:
         """Extract a specific section from content based on section name.
-        
+
         Args:
             content: The full content to search in
             section_name: The name of the section to extract
             max_paragraphs: Maximum number of paragraphs to include
-            
+
         Returns:
             str: The extracted section content or empty string if not found
         """
         try:
             # First try to find the section using HTML structure
             soup = BeautifulSoup(content, 'html.parser')
-            
+
             # Look for common section patterns
             patterns = [
                 # Headers with the section name
                 lambda: soup.find(['h1', 'h2', 'h3'], string=lambda t: t and section_name.lower() in t.lower()),
                 # Section/div with class or id containing section name
-                lambda: soup.find(['section', 'div'], 
+                lambda: soup.find(['section', 'div'],
                                 class_=lambda c: c and section_name.lower() in c.lower()),
-                lambda: soup.find(['section', 'div'], 
+                lambda: soup.find(['section', 'div'],
                                 id=lambda i: i and section_name.lower() in i.lower()),
                 # Articles with section name in class/id
-                lambda: soup.find('article', 
+                lambda: soup.find('article',
                                class_=lambda c: c and section_name.lower() in c.lower()),
                 # Fallback: find any element with section name in text
                 lambda: soup.find(string=lambda t: t and section_name.lower() in t.lower())
             ]
-            
+
             section_element = None
             for pattern in patterns:
                 try:
@@ -3457,43 +3574,43 @@ except Exception as e:
                         break
                 except:
                     continue
-            
+
             if not section_element:
                 return ""
-            
+
             # Get the parent element if we found a text node
             if not hasattr(section_element, 'find_all'):
                 section_element = section_element.parent
-            
+
             # Extract the content after the section header
             content_parts = []
             current = section_element
-            
+
             # Get the next siblings until we hit another header or max_paragraphs
             while current and len(content_parts) < max_paragraphs:
                 current = current.find_next_sibling()
                 if not current:
                     break
-                    
+
                 # Stop at next section
                 if current.name and current.name.startswith('h') and len(current.name) == 2:
                     break
-                    
+
                 # Get text from paragraph or other block element
                 if current.name in ['p', 'div', 'section']:
                     text = current.get_text(separator=' ', strip=True)
                     if text:
                         content_parts.append(text)
-            
+
             return ' '.join(content_parts) if content_parts else ""
-            
+
         except Exception as e:
             logger.error(f"Error extracting section '{section_name}': {str(e)}")
             return ""
 
     def _process_content_for_task(self, url: str, content: str) -> None:
         """Process extracted web content to fill TaskCompleter info.
-        
+
         This method processes web content and extracts relevant information
         based on the current task type and requirements.
         """
@@ -3504,7 +3621,7 @@ except Exception as e:
         logger.debug(f"Processing content from {url} for task type: {self.task_completer.task_type}")
         task_type = (self.task_completer.task_type or "").lower()
         required = self.task_completer.get_missing_info()
-        
+
         # Always process content to extract and store information
         # even if we don't have specific requirements yet
 
@@ -3514,16 +3631,16 @@ except Exception as e:
                 # Initialize data structures
                 key_facts = []
                 metadata = {}
-                
+
                 # Parse HTML and extract basic information
                 soup = BeautifulSoup(content, 'html.parser')
-                
+
                 # Extract title and metadata
                 title = soup.title.string if soup.title else ""
                 if title and len(title) < 200:  # Reasonable title length
                     metadata['title'] = title.strip()
                     key_facts.append(f"Title: {title.strip()}")
-                
+
                 # Extract meta description and keywords if available
                 for meta in soup.find_all('meta'):
                     name = meta.get('name', '').lower()
@@ -3531,53 +3648,53 @@ except Exception as e:
                         metadata['description'] = meta.get('content', '')
                     elif name == 'keywords':
                         metadata['keywords'] = meta.get('content', '')
-                
+
                 # Extract key sections using semantic HTML and common patterns
                 section_headers = [
                     'early life', 'biography', 'achievements', 'legacy', 'personal life',
                     'accomplishments', 'timeline', 'key events', 'major works', 'notable works'
                 ]
-                
+
                 for header in section_headers:
                     section = self._extract_section(content, header)
                     if section and len(section) > 50:  # Only include meaningful sections
                         key_facts.append(f"{header.title()}: {section}")
-                
+
                 # Extract dates and key events with better patterns
                 date_patterns = [
                     r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',
                     r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b',
                     r'\b(?:19|20)\d{2}\b'
                 ]
-                
+
                 dates = []
                 for pattern in date_patterns:
                     dates.extend(re.findall(pattern, content, re.IGNORECASE))
-                
+
                 if dates:
                     unique_dates = sorted(set(dates), key=len, reverse=True)  # Sort by length (most specific first)
                     key_facts.append(f"Key Dates: {', '.join(unique_dates[:10])}")  # Limit to top 10 dates
-                
+
                 # Add to task completer if we found useful information
                 if key_facts:
                     # Store all extracted facts
                     facts_text = "\n".join(key_facts)
                     self.task_completer.add_information("key_facts", facts_text)
                     logger.info(f"Extracted {len(key_facts)} key facts for creative content")
-                    
+
                     # Store metadata if available
                     if metadata:
                         for key, value in metadata.items():
                             if value:  # Only store non-empty values
                                 self.task_completer.add_information(f"meta_{key}", value)
-                    
+
                     # Set subject if not already set
                     if "subject" in required and not self.task_completer.get_information("subject"):
                         if 'title' in metadata:
                             self.task_completer.add_information("subject", metadata['title'])
                         elif title:
                             self.task_completer.add_information("subject", title)
-                    
+
                     # Infer tone from content if needed
                     if "tone" in required and not self.task_completer.get_information("tone"):
                         content_lower = content.lower()
@@ -3587,25 +3704,25 @@ except Exception as e:
                             'inspiring': ['inspire', 'courage', 'brave', 'determination', 'overcome'],
                             'informative': ['report', 'study', 'research', 'findings', 'analysis']
                         }
-                        
+
                         detected_tones = []
                         for tone, keywords in tone_keywords.items():
                             if any(keyword in content_lower for keyword in keywords):
                                 detected_tones.append(tone)
-                        
+
                         # Default to informative if no strong tone detected
                         tone = detected_tones[0] if detected_tones else 'informative'
                         self.task_completer.add_information("tone", tone)
-                    
+
                     # Set style if needed
                     if "style" in required and not self.task_completer.get_information("style"):
                         # Default to historical for biographies, otherwise narrative
                         style = "historical" if "biography" in content_lower else "narrative"
                         self.task_completer.add_information("style", style)
-                    
+
                     # Add source URL for reference
                     self.task_completer.add_information("source_url", url)
-                        
+
             except Exception as e:
                 logger.error(f"Error processing content for creative task: {e}", exc_info=True)
 
